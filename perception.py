@@ -4,25 +4,21 @@ import matplotlib.pyplot as plt
 import time
 import matplotlib
 from matplotlib.gridspec import GridSpec
-from image_processing import load_clustering_data
 
 START_PLOT = 0
-CONTINUATION_DEBUG = True
-PROXIMITY_SHOW = True
-PROXIMITY_DEBUG = True
+CONTINUATION_DEBUG = False
+PROXIMITY_SHOW = False
+PROXIMITY_DEBUG = False
 SAVE_FIG = False
 LOCALITY = True
-WITHLINE = True
+WITHLINE = False
 if SAVE_FIG:
     matplotlib.use("Agg")
 
 
 class Perception:
 
-    def __init__(self, log_path=None, k=None, metric='euclidean', linkage='single'):
-        # metric can be “euclidean” or "precomputed".
-        # If metric is “precomputed”, a distance matrix is needed as input for the fit method.
-        # linkage can be “average” or “single”.
+    def __init__(self, log_path=None, k=None):
         self.history_info = {
             'inter_intra_dist_ratio': [],
             'point_base_dist_Ratio': [],
@@ -48,21 +44,15 @@ class Perception:
         self.THRESHOLD_CONTINUATION = 0.15
         self.NUM_NEAREST_CLUSTERS = 5
         self.k = k
-        self.metric = metric
-        self.linkage = linkage
 
-    def fit(self, X, distance_matrix=None):
+    def fit(self, X):
         self.X = X
-        # self.distance_matrix is the distance matrix of the points
-        self.distance_matrix = distance_matrix
         self.DIMENSION = len(X[0])
         self.X_RANGE = min(X[:, 0]), max(X[:, 0])
         self.Y_RANGE = min(X[:, 1]), max(X[:, 1])
-        # self.DIST_MATRIX is for clusters
         self.DIST_MATRIX = np.full((len(X), len(X)), np.inf)
         self.FAIL_MATRIX = np.empty((len(X), len(X), 2))
 
-        # 'data' is the list of indices of the points in the cluster
         self.initial_clusters = {
             id: {
                 'label': id,
@@ -79,8 +69,6 @@ class Perception:
             for id, x in enumerate(self.X)}
 
         start_time = time.time()
-        # in the following line of code, self.DIST_MATRIX is also initialized.
-        # What is the self.points_dist?
         self.clusters_dist, self.points_dist = self.initiate_dists()
         early_stop = False
 
@@ -127,10 +115,10 @@ class Perception:
                     is_complete, merged_cluster = self.merge_clusters(c1, c2)
                     if is_complete:
                         last_merged_cluster = merged_cluster
-                    #     if len(self.initial_clusters) < START_PLOT:
-                    #         self.plot(WITHLINE)
-                    #         if self.DIMENSION > 3:
-                    #             self.save_clusters()
+                        if len(self.initial_clusters) < START_PLOT:
+                            self.plot(WITHLINE)
+                            if self.DIMENSION > 3:
+                                self.save_clusters()
                 else:
                     i += 1
 
@@ -147,7 +135,7 @@ class Perception:
                 res = np.column_stack((self.X, Y_hat))
                 np.savetxt(f'/k.out', res)
 
-                # self.plot(withline=True)
+                self.plot(withline=True)
                 self.post_processing()
 
         print(f"Clustering finished in {(time.time() - start_time) / 60} minutes")
@@ -198,16 +186,11 @@ class Perception:
         for i in range(len(list_clusters)):
             for j in range(i + 1, len(list_clusters)):
                 _d = self.compute_2_clusters_dist(list_clusters[i], list_clusters[j])
-                # 'distance_info' is a dictionary containing all the information about the distance between two clusters.
                 clusters_dists[frozenset([list_clusters[i],
                                  list_clusters[j]])] = {
                     'distance_info': _d
                 }
-                if self.linkage == 'average':
-                    _d = _d['average_dist']['distance']
-                elif self.linkage == 'single':
-                    _d = _d['near_dist']['distance']
-                # _d is a number in the following
+                _d = _d['near_dist']['distance']
                 self.DIST_MATRIX[j][i], self.DIST_MATRIX[i][j] = _d, _d
 
                 if list_clusters[i] in points_dists.keys():
@@ -239,40 +222,24 @@ class Perception:
     def compute_2_clusters_dist(self, c1, c2):
         '''
         This is to calculate the distance between two clusters, c1 and c2.
+        The easiest way is the distance between two centers.
         :param c1:
         :param c2:
         :return: distance
         '''
 
         closest_points = self.closest_points_btn_2_clusters(c1, c2)
+        near_dist = np.linalg.norm(self.X[closest_points[0]] - self.X[closest_points[1]]), closest_points[0], closest_points[1]
 
-        if self.metric == 'euclidean':
-            near_dist = np.linalg.norm(self.X[closest_points[0]] - self.X[closest_points[1]]), closest_points[0], closest_points[1]
+        center_dist = np.linalg.norm(self.initial_clusters[c1]['center'] - self.initial_clusters[c2]['center']), \
+               self.initial_clusters[c1]['center'], self.initial_clusters[c2]['center']
 
-            center_dist = np.linalg.norm(self.initial_clusters[c1]['center'] - self.initial_clusters[c2]['center']), \
-                   self.initial_clusters[c1]['center'], self.initial_clusters[c2]['center']
-
-            average_dist = 0
-            for i in self.initial_clusters[c1]['data']:
-                for j in self.initial_clusters[c2]['data']:
-                    average_dist += np.linalg.norm(self.X[i] - self.X[j])
-            average_dist /= len(self.initial_clusters[c1]['data']) * len(self.initial_clusters[c2]['data'])
-        elif self.metric == 'precomputed':
-            near_dist = self.distance_matrix[closest_points[0], closest_points[1]], closest_points[0], closest_points[1]
-
-            center_dist = self.distance_matrix[c1, c2], c1, c2
-
-            average_dist = 0
-            for i in self.initial_clusters[c1]['data']:
-                for j in self.initial_clusters[c2]['data']:
-                    average_dist += self.distance_matrix[i, j]
-            average_dist /= len(self.initial_clusters[c1]['data']) * len(self.initial_clusters[c2]['data'])
-
+        mix_dist = (near_dist[0] + center_dist[0]) / 2, None, None
 
         dist = {
             'near_dist': {'distance': near_dist[0], 'reference_points': {c1: near_dist[1], c2: near_dist[2]}},
             'center_dist': {'distance': center_dist[0], 'reference_points': {c1: center_dist[1], c2: center_dist[2]}},
-            'average_dist': {'distance': average_dist, 'reference_points': {c1: near_dist[1], c2: near_dist[2]}}
+            'mix_dist': {'distance': mix_dist[0], 'reference_points': {c1: mix_dist[1], c2: mix_dist[2]}}
         }
 
         return dist
@@ -318,12 +285,8 @@ class Perception:
             key = frozenset((new_c, c))
             _d = self.compute_2_clusters_dist(new_c, c)
             self.clusters_dist[key]['distance_info'] = _d
-            if self.linkage == 'single':
-                self.DIST_MATRIX[new_c][c], self.DIST_MATRIX[c][new_c] = _d['near_dist']['distance'], \
+            self.DIST_MATRIX[new_c][c], self.DIST_MATRIX[c][new_c] = _d['near_dist']['distance'], \
                                                              _d['near_dist']['distance']
-            elif self.linkage == 'average':
-                self.DIST_MATRIX[new_c][c], self.DIST_MATRIX[c][new_c] = _d['average_dist']['distance'], \
-                                                             _d['average_dist']['distance']
         self.MIN_BTN_CLUSTER_DIST = max(self.DIST_MATRIX.min(), self.MIN_BTN_CLUSTER_DIST)
         # self.MIN_BTN_CLUSTER_DIST = self.DIST_MATRIX.min()
 
@@ -352,12 +315,10 @@ class Perception:
         print(f'--Adaptive threshold: {proximity}, {adaptive_proximity_T1}, {adaptive_proximity_T2}')
 
         # if proximity > adaptive_proximity_T:  # self.THRESHOLD_ROXIMITY
-        # adaptive_proximity_T1, adaptive_proximity_T2 = 1.6, 1.6
         if proximity > adaptive_proximity_T1 or proximity > adaptive_proximity_T2:
-            self.continuation_data['continuation'].append(0)
+            # self.continuation_data['continuation'].append(0)
             self.continuation_data['merged'].append(False)
             return False, cluster1, cluster2
-            # return True, lead_cluster, child_cluster
 
         continuation = self.compute_continuation(lead_cluster, child_cluster,
                                                  self.THRESHOLD_CONTINUATION / shape_diff,
@@ -381,10 +342,7 @@ class Perception:
         return False, lead_cluster, child_cluster
 
     def compute_force_btn_clusters(self, cluster1, cluster2):
-        if self.linkage == 'single':
-            dist = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['near_dist']['distance']
-        elif self.linkage == 'average':
-            dist = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['average_dist']['distance']
+        dist = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['mix_dist']['distance']
         m1, m2 = len(self.initial_clusters[cluster1]['data']), len(self.initial_clusters[cluster2]['data'])
         f = m1 * m2 / (dist**2)
         return f
@@ -421,18 +379,11 @@ class Perception:
                 #     cont_clusters.append(rc[1])
                 #     if len(cont_clusters) == 2:
                 #         break
-                if self.linkage == 'single':
-                    dist_c_cluster1 = \
-                        self.clusters_dist[frozenset((rc[1], cluster1))]['distance_info']['near_dist']['distance']
-                    dist_c_cluster2 = \
-                        self.clusters_dist[frozenset((rc[1], cluster2))]['distance_info']['near_dist']['distance'] \
-                            if rc[1] != cluster2 else dist_c_cluster1
-                elif self.linkage == 'average':
-                    dist_c_cluster1 = \
-                        self.clusters_dist[frozenset((rc[1], cluster1))]['distance_info']['average_dist']['distance']
-                    dist_c_cluster2 = \
-                        self.clusters_dist[frozenset((rc[1], cluster2))]['distance_info']['average_dist']['distance'] \
-                            if rc[1] != cluster2 else dist_c_cluster1
+                dist_c_cluster1 = \
+                    self.clusters_dist[frozenset((rc[1], cluster1))]['distance_info']['near_dist']['distance']
+                dist_c_cluster2 = \
+                    self.clusters_dist[frozenset((rc[1], cluster2))]['distance_info']['near_dist']['distance'] \
+                        if rc[1] != cluster2 else dist_c_cluster1
                 cont_clusters.append((rc[0], (dist_c_cluster2 + dist_c_cluster1) / 2))
                 Total_affect += rc[0]
                 if len(cont_clusters) == N_rc:
@@ -622,10 +573,7 @@ class Perception:
                threshold2 * size2 / (size1 + size2)
 
     def compute_proximity(self, cluster1, cluster2):
-        if self.linkage == 'single':
-            distance = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['near_dist']['distance']
-        elif self.linkage == 'average':
-            distance = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['average_dist']['distance']
+        distance = self.clusters_dist[frozenset((cluster1, cluster2))]['distance_info']['near_dist']['distance']
         n1, n2 = len(self.initial_clusters[cluster1]['past_dists']), len(self.initial_clusters[cluster2]['past_dists'])
         n = max(n1//2, n2) if n1 > n2 else max(n2//2, n1)
 
@@ -1663,6 +1611,21 @@ class Perception:
 
         plt.savefig(f'{self.log_path}/{len(self.initial_clusters)}.png')
         plt.close('all')
+
+    # def plot_clusters(self, ax=False, withline=False):
+    #
+    #     for k, cluster in self.initial_clusters.items():
+    #         if self.DIMENSION == 2:
+    #             scatter = ax1.scatter(self.X[cluster['data']][:, 0], self.X[cluster['data']][:, 1])
+    #             ax1.text(self.X[cluster['data'][0]][0], self.X[cluster['data'][0]][1], k)
+    #             if withline:
+    #                 for track in cluster['traces']:
+    #                     # axes[0, 0].plot(np.array(track)[:, 0], np.array(track)[:, 1],
+    #                     #                 color=scatter.get_facecolor()[0], linestyle='-')
+    #                     ax1.plot(self.X[list(track)][:, 0], self.X[list(track)][:, 1], 'k-')
+    #         else:
+    #             scatter = ax1.scatter(self.X[cluster['data']][:, 0], self.X[cluster['data']][:, 1],
+    #                                   self.X[cluster['data']][:, 2])
 
     def plot_clusters_info(self):
         plt.clf()
