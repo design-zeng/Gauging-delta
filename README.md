@@ -2,7 +2,7 @@
 
 This repository contains a python implementation of the clustering algorithm presented in:
 
-Jinli Yao, Jie Pan, and Yong Zeng. Gauging-$\delta$: A Non-parametric Hierarchical Clustering Algorithm, IEEE Transactions on Pattern Analysis and Machine Intelligence (under review) (2024).
+Jinli Yao, Jie Pan, and Yong Zeng. Gauging-$\delta$: A Non-parametric Hierarchical Clustering Algorithm, IEEE Transactions on Pattern Analysis and Machine Intelligence, 2025.
 
 If you use this implementation in your work, please add a reference/citation to the paper:
 
@@ -11,7 +11,11 @@ If you use this implementation in your work, please add a reference/citation to 
   title={Gauging-$\delta$: A Non-parametric Hierarchical Clustering Algorithm},
   author={Jinli, Yao and Jie, Pan and Yong, Zeng},
   journal={IEEE Transactions on Pattern Analysis and Machine Intelligence},
-  year={2024}
+  year={2025},
+  volume={},
+  number={},
+  pages={1-12},
+  doi={10.1109/TPAMI.2025.3545573}
 }
 ```
 
