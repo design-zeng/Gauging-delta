@@ -1,0 +1,65 @@
+---
+kind: code-bound
+title: "Weka ARFF Format Parser"
+description: "ARFF file format parser for Weka dataset compatibility"
+path: "load_data.py"
+function: "load_arff"
+complexity: "O(n) where n is number of data rows"
+parameters:
+  - name: "file_name"
+    type: "string"
+    description: "Path to ARFF format file"
+---
+
+# Weka ARFF Format Parser
+
+## Function Reference
+**Primary Function**: `load_arff()` in `load_data.py`
+
+## Purpose
+
+The Weka ARFF Format Parser handles ARFF (Attribute-Relation File Format) files, which are commonly used in machine learning datasets, particularly those from the UCI repository. It converts the ARFF structure into a numpy array for downstream processing.
+
+## Input/Output
+
+**Inputs:**
+- `file_name`: Path to the ARFF file to be parsed
+
+**Outputs:**
+- Numpy array containing all data (features + labels) from the ARFF file
+
+## Processing Logic
+
+1. **File Reading**: Opens the ARFF file and uses the arff library to parse the structure
+2. **Data Extraction**: Extracts the 'data' field from the parsed ARFF dictionary
+3. **Array Conversion**: Converts the list-based data into a numpy array
+
+## ARFF Format Handling
+
+The function handles standard ARFF format elements:
+- **@relation**: Dataset name (metadata only)
+- **@attribute**: Column definitions with types
+- **@data**: Actual data rows
+
+The arff library automatically handles:
+- Quoted strings and numeric values
+- Missing values (represented as ?)
+- Different attribute types (numeric, string, date)
+
+## Integration Context
+
+This function is called by `read_data()` when the file extension is `.arff`. The returned array is then processed by the main `read_data()` function for:
+- Dataset-specific row/column adjustments
+- Label encoding for categorical variables
+- Feature/label separation
+
+## Error Considerations
+
+- File not found exceptions are propagated to caller
+- Malformed ARFF syntax is handled by the arff library
+- Type conversion issues may arise if mixed data types are present
+
+## Dependencies
+
+- `arff` library for ARFF format parsing
+- `numpy` for array operations

@@ -1,0 +1,73 @@
+---
+kind: code-bound
+title: "HDF5 Dataset Loader"
+description: "HDF5 dataset loader for train/test split datasets"
+path: "load_data.py"
+function: "load_h5"
+complexity: "O(n) where n is total number of data points"
+parameters:
+  - name: "file_path"
+    type: "string"
+    description: "Path to HDF5 format file"
+---
+
+# HDF5 Dataset Loader
+
+## Function Reference
+**Primary Function**: `load_h5()` in `load_data.py`
+
+## Purpose
+
+The HDF5 Dataset Loader handles datasets stored in HDF5 format, which typically contain separate training and testing splits. This format is common in large-scale machine learning benchmarks and hierarchical data storage.
+
+## Input/Output
+
+**Inputs:**
+- `file_path`: Path to the HDF5 file containing the dataset
+
+**Outputs:**
+- `X_tr`: Training features numpy array
+- `y_tr`: Training labels numpy array  
+- `X_te`: Test features numpy array
+- `y_te`: Test labels numpy array
+
+## Processing Logic
+
+1. **File Access**: Opens the HDF5 file using h5py in read mode
+2. **Training Data Extraction**: 
+   - Accesses the 'train' group
+   - Extracts 'data' for features and 'target' for labels
+3. **Test Data Extraction**:
+   - Accesses the 'test' group  
+   - Extracts 'data' for features and 'target' for labels
+4. **Return**: Returns all four arrays as a tuple
+
+## HDF5 Structure Expectation
+
+The function expects the following hierarchical structure:
+```
+file.h5
+├── train/
+│   ├── data (dataset)
+│   └── target (dataset)
+└── test/
+    ├── data (dataset)
+    └── target (dataset)
+```
+
+## Integration Context
+
+This function is called by `read_data()` when the file extension is `.h5`. The returned training data (X_tr, y_tr) is typically used for clustering, while test data may be held out for evaluation.
+
+Note that the main `read_data()` function only returns the training split, following the clustering algorithm's convention of using training data for cluster discovery.
+
+## Error Handling
+
+- File access errors are propagated through h5py exceptions
+- Missing groups or datasets will result in KeyError
+- Data type conversion is handled automatically by h5py
+
+## Dependencies
+
+- `h5py` library for HDF5 file operations
+- `numpy` for array handling (implicit through h5py)
