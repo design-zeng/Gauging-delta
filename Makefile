@@ -1,0 +1,83 @@
+# Makefile for Gauging-δ development
+# Usage: make <target>
+
+.PHONY: help install dev test lint format typecheck security clean all check
+
+# Default target
+help:
+	@echo "Gauging-δ Development Commands"
+	@echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
+	@echo ""
+	@echo "  make install    Install package in editable mode"
+	@echo "  make dev        Install with dev dependencies"
+	@echo "  make test       Run test suite"
+	@echo "  make lint       Run linter (ruff)"
+	@echo "  make format     Format code (ruff)"
+	@echo "  make typecheck  Run type checker (mypy)"
+	@echo "  make security   Run security scanner (bandit)"
+	@echo "  make check      Run all checks (lint, typecheck, test)"
+	@echo "  make clean      Remove build artifacts"
+	@echo "  make all        Install and run all checks"
+	@echo ""
+
+# Installation
+install:
+	pip install -e .
+
+dev:
+	pip install -e ".[dev,viz]"
+	pre-commit install
+
+# Testing
+test:
+	pytest tests/ -v --tb=short
+
+test-cov:
+	pytest tests/ -v --cov=src/gauging_delta --cov-report=term-missing --cov-report=html
+
+# Linting and formatting
+lint:
+	ruff check src/ tests/
+
+lint-fix:
+	ruff check src/ tests/ --fix
+
+format:
+	ruff format src/ tests/
+
+format-check:
+	ruff format src/ tests/ --check
+
+# Type checking
+typecheck:
+	mypy src/gauging_delta/
+
+# Security
+security:
+	bandit -r src/ -c pyproject.toml
+
+# Combined checks
+check: lint typecheck test
+
+# Pre-commit
+pre-commit:
+	pre-commit run --all-files
+
+# Cleaning
+clean:
+	rm -rf build/
+	rm -rf dist/
+	rm -rf *.egg-info/
+	rm -rf src/*.egg-info/
+	rm -rf .pytest_cache/
+	rm -rf .mypy_cache/
+	rm -rf .ruff_cache/
+	rm -rf htmlcov/
+	rm -rf .coverage
+	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
+	find . -type f -name "*.pyc" -delete
+
+# Full workflow
+all: dev check
+	@echo ""
+	@echo "✓ All checks passed!"
