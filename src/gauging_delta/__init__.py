@@ -10,6 +10,7 @@ mergeability function that considers proximity and continuity statistics.
 """
 
 from gauging_delta.core.algorithm import GaugingDelta
+from gauging_delta.core.algorithm_fast import GaugingDeltaFast
 from gauging_delta.core.cluster import Cluster, ClusterPairInfo, MergeabilityResult
 
 
@@ -18,5 +19,6 @@ __all__ = [
     "Cluster",
     "ClusterPairInfo",
     "GaugingDelta",
+    "GaugingDeltaFast",
     "MergeabilityResult",
 ]

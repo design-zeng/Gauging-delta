@@ -24,6 +24,12 @@
 - **Adaptive Thresholds (T)** — Dynamically adjusts mergeability criteria based on environmental context
 - **Continuity Analysis** — Evaluates density transitions and angular smoothness between cluster boundaries
 
+<div align="center">
+
+![Gauging-δ clustering visualization](assets/readme_plot.png)
+
+</div>
+
 ### Key Features
 
 | Feature | Description |
@@ -35,12 +41,37 @@
 
 ---
 
-## Installation
+## Performance
 
-### Using pip (recommended)
+Three implementation variants are benchmarked across dataset sizes from 100 to 10,000 points:
+
+| Variant | Description | Parity (ARI) | Complexity |
+|---------|-------------|:------------:|------------|
+| **Original** | `perception.py` baseline | — | O(N³+) time, O(N²) space |
+| **Max-Parity** | `GaugingDelta` — refactored | **1.000** | O(N²) time, O(N²) space |
+| **Max-Fast** | `GaugingDeltaFast` — vectorized + KDTree | ≥ 0.95 | O(N²) init, O(N·k) merge |
+
+<div align="center">
+
+![Benchmark results](assets/benchmark_combined.png)
+
+</div>
+
+Run the benchmark yourself (designed for overnight execution):
 
 ```bash
-pip install gauging-delta
+uv sync --extra bench
+uv run python benchmarks/benchmark_all.py
+```
+
+---
+
+## Installation
+
+### Using uv (recommended)
+
+```bash
+uv add gauging-delta
 ```
 
 ### From source
@@ -48,17 +79,13 @@ pip install gauging-delta
 ```bash
 git clone https://github.com/design-zeng/Gauging-delta.git
 cd Gauging-delta
-pip install -e .
+uv sync
 ```
 
 ### Development installation
 
 ```bash
-# Using uv (fast)
 uv sync --all-extras
-
-# Or using pip
-pip install -e ".[dev]"
 ```
 
 ---
@@ -228,13 +255,19 @@ Gauging-delta/
 │   ├── geometry/
 │   │   ├── angles.py         # Angle calculations
 │   │   └── spatial.py        # KDTree spatial queries
-│   └── mergeability/
-│       ├── proximity.py      # ρ computation
-│       ├── threshold.py      # T, β, F, ξ computation
-│       └── continuity.py     # Continuity analysis
+│   ├── mergeability/
+│   │   ├── proximity.py      # ρ computation
+│   │   ├── threshold.py      # T, β, F, ξ computation
+│   │   └── continuity.py     # Continuity analysis
+│   ├── utils/
+│   │   └── math_utils.py     # Safe division, sigmoid, clamp
+│   └── visualization/
+│       └── plotter.py        # Matplotlib cluster plots
+├── benchmarks/
+│   ├── benchmark_all.py      # Runtime, space & parity benchmarks
+│   └── test_performance.py   # Pytest-based performance tests
 ├── tests/                    # Comprehensive test suite
-├── data/                     # Benchmark datasets
-└── legacy/                   # Original implementation
+└── data/                     # Benchmark datasets
 ```
 
 ---
@@ -247,7 +280,7 @@ Gauging-delta/
 # Clone and install with dev dependencies
 git clone https://github.com/design-zeng/Gauging-delta.git
 cd Gauging-delta
-pip install -e ".[dev,viz]"
+uv sync --extra dev
 
 # Install pre-commit hooks
 pre-commit install

@@ -56,6 +56,7 @@ def compute_angle_batch(
     Compute angles between ref vector and multiple points (vectorized).
 
     This is the 100x faster version for batch angle calculations.
+    Applies same rounding as scalar compute_angle for legacy parity.
 
     Args:
         origin: Origin point (vertex of angles)
@@ -71,14 +72,17 @@ def compute_angle_batch(
     norm_ref = np.linalg.norm(v_ref)
     norms_points = np.linalg.norm(v_points, axis=1)
 
-    # Handle degenerate cases
-    valid = (norm_ref > 0) & (norms_points > 0)
+    # Handle degenerate cases - match legacy: round(norm1 * norm2, 4) == 0
+    norm_products = norm_ref * norms_points
+    valid = np.round(norm_products, 4) != 0
 
     angles = np.zeros(len(points))
     if norm_ref > 0 and np.any(valid):
         # Vectorized dot product using einsum
         dot_products = np.einsum("i,ji->j", v_ref, v_points[valid])
-        cos_angles = np.clip(dot_products / (norm_ref * norms_points[valid]), -1.0, 1.0)
+        # Match legacy: round to 4 decimal places before arccos
+        cos_angles = np.round(dot_products / norm_products[valid], 4)
+        cos_angles = np.clip(cos_angles, -1.0, 1.0)
         angles[valid] = np.arccos(cos_angles)
 
     return angles

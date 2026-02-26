@@ -12,8 +12,8 @@ import pytest
 # Add src to path for imports
 sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
 
-# Import legacy implementation for parity tests
-sys.path.insert(0, str(Path(__file__).parent.parent / "legacy"))
+# Add project root for perception.py (parity tests)
+sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
 @pytest.fixture

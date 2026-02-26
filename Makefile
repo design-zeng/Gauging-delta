@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full
 
 # Default target
 help:
@@ -16,16 +16,19 @@ help:
 	@echo "  make typecheck  Run type checker (mypy)"
 	@echo "  make security   Run security scanner (bandit)"
 	@echo "  make check      Run all checks (lint, typecheck, test)"
+	@echo "  make benchmark  Run full benchmarks (standalone)"
+	@echo "  make bench-test Run benchmark tests (pytest)"
+	@echo "  make bench-full Run full benchmark suite (60 GB RAM)"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make all        Install and run all checks"
 	@echo ""
 
 # Installation
 install:
-	pip install -e .
+	uv sync
 
 dev:
-	pip install -e ".[dev,viz]"
+	uv sync --extra dev
 	pre-commit install
 
 # Testing
@@ -56,6 +59,16 @@ typecheck:
 security:
 	bandit -r src/ -c pyproject.toml
 
+# Benchmarks
+benchmark:
+	uv run python benchmarks/benchmark_all.py
+
+bench-test:
+	uv run pytest benchmarks/test_performance.py -v --tb=short
+
+bench-full:
+	uv run --extra bench python benchmarks/run_full_benchmark.py
+
 # Combined checks
 check: lint typecheck test
 
@@ -76,6 +89,7 @@ clean:
 	rm -rf .coverage
 	find . -type d -name __pycache__ -exec rm -rf {} + 2>/dev/null || true
 	find . -type f -name "*.pyc" -delete
+	rm -rf benchmarks/results/
 
 # Full workflow
 all: dev check

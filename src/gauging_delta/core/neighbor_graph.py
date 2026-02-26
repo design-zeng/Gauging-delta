@@ -53,6 +53,7 @@ class NeighborGraph:
     dead_clusters: set[int] = field(default_factory=set, init=False)
     cluster_points: dict[int, np.ndarray] = field(default_factory=dict, init=False)
     cluster_centers: dict[int, np.ndarray] = field(default_factory=dict, init=False)
+    point_to_cluster: np.ndarray | None = field(default=None, init=False)  # Reverse lookup
 
     def __post_init__(self):
         """Build KDTree after initialization."""
@@ -72,6 +73,7 @@ class NeighborGraph:
         k = min(self.n_neighbors + 1, n_points)  # +1 because query includes self
 
         # Initialize each point as its own cluster
+        self.point_to_cluster = np.arange(n_points)  # point i -> cluster i initially
         for i in range(n_points):
             self.cluster_points[i] = np.array([i])
             self.cluster_centers[i] = self.X[i].copy()
@@ -161,10 +163,15 @@ class NeighborGraph:
         # Recompute centroid
         self.cluster_centers[keep_id] = np.mean(self.X[merged_points], axis=0)
 
+        # Update point_to_cluster for all merged points
+        if self.point_to_cluster is not None:
+            self.point_to_cluster[merged_points] = keep_id
+
         # Transfer neighbors from removed cluster
         for neighbor in self.neighbors.get(remove_id, set()):
             if neighbor != keep_id and neighbor not in self.dead_clusters:
                 self.neighbors[keep_id].add(neighbor)
+                self.neighbors[neighbor].add(keep_id)  # Ensure bidirectional
                 # Push new edge to heap
                 dist, _, _ = self.get_cluster_distance(keep_id, neighbor)
                 edge = (min(keep_id, neighbor), max(keep_id, neighbor))
@@ -187,39 +194,62 @@ class NeighborGraph:
         Returns:
             Tuple of (distance, point_i, point_j) where points are the
             closest pair between the clusters
+            
+        OPTIMIZED: Uses vectorized distance computation with tie-breaking correction.
+        When multiple pairs have distances within epsilon of minimum, resolves
+        ties using legacy iteration order.
         """
         points_i = self.cluster_points[c_i]
         points_j = self.cluster_points[c_j]
-
-        # For small clusters, brute force is fine
-        if len(points_i) * len(points_j) <= 1000:
+        
+        n_i, n_j = len(points_i), len(points_j)
+        
+        # For small clusters, use direct loop (overhead of vectorization not worth it)
+        if n_i * n_j <= 16:
             min_dist = float("inf")
             best_i, best_j = points_i[0], points_j[0]
-
             for pi in points_i:
                 for pj in points_j:
                     d = np.linalg.norm(self.X[pi] - self.X[pj])
                     if d < min_dist:
                         min_dist = d
                         best_i, best_j = pi, pj
-
             return (min_dist, best_i, best_j)
-
-        # For larger clusters, use KDTree query
-        # Build temporary KDTree for cluster j
-        tree_j = KDTree(self.X[points_j])
-
-        min_dist = float("inf")
-        best_i, best_j = points_i[0], points_j[0]
-
-        for pi in points_i:
-            dist, idx = tree_j.query(self.X[pi], k=1)
-            if dist < min_dist:
-                min_dist = dist
-                best_i = pi
-                best_j = points_j[idx]
-
-        return (min_dist, best_i, best_j)
+        
+        # Vectorized distance computation using np.linalg.norm for exact parity
+        # NOTE: scipy cdist uses different FP accumulation that causes ~15% of
+        # distances to differ at the last bit vs np.linalg.norm. We must use
+        # np.linalg.norm for bit-exact parity with legacy.
+        Xi = self.X[points_i]  # shape (n_i, dim)
+        Xj = self.X[points_j]  # shape (n_j, dim)
+        
+        # Compute pairwise distances: dists[i,j] = ||Xi[i] - Xj[j]||
+        diff = Xi[:, np.newaxis, :] - Xj[np.newaxis, :, :]  # (n_i, n_j, dim)
+        dists = np.linalg.norm(diff, axis=2)  # (n_i, n_j)
+        
+        # Find minimum and potential ties
+        min_dist = dists.min()
+        
+        # Epsilon for tie detection - must catch all numerical near-ties
+        eps = max(1e-12, min_dist * 1e-9)
+        
+        # Find all pairs within epsilon of minimum
+        tie_mask = dists <= min_dist + eps
+        tie_count = np.count_nonzero(tie_mask)
+        
+        if tie_count == 1:
+            # No ties - use vectorized result directly
+            idx = np.argmin(dists)
+            idx_i, idx_j = divmod(idx, n_j)
+            return (float(dists[idx_i, idx_j]), points_i[idx_i], points_j[idx_j])
+        
+        # Multiple ties - resolve using legacy iteration order
+        # Legacy order: outer loop over points_i, inner loop over points_j
+        for local_i in range(n_i):
+            for local_j in range(n_j):
+                if tie_mask[local_i, local_j]:
+                    # First tie in legacy order wins
+                    return (float(dists[local_i, local_j]), points_i[local_i], points_j[local_j])
 
     def get_active_clusters(self) -> set[int]:
         """Return set of cluster IDs that are still active (not dead)."""

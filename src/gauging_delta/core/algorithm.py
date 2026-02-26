@@ -59,6 +59,7 @@ class GaugingDelta:
         threshold_continuity: float = 0.15,
         n_neighbors: int = 5,
         graph_neighbors: int = 50,
+        legacy_point_dists: bool = True,
         preserve_labels: bool = False,
         capture_merges: bool = False,
     ):
@@ -66,6 +67,7 @@ class GaugingDelta:
         self.T_continuity = threshold_continuity
         self.K_neighbors = n_neighbors
         self.graph_neighbors = graph_neighbors
+        self.legacy_point_dists = legacy_point_dists
         self.preserve_labels = preserve_labels
         self.capture_merges = capture_merges
 
@@ -78,6 +80,9 @@ class GaugingDelta:
         # Internal state
         self._graph: Optional[NeighborGraph] = None
         self._X: Optional[np.ndarray] = None
+        self._point_dists: list[list[tuple[int, float]]] | None = None
+        self._dist_matrix: Optional[np.ndarray] = None
+        self._ref_points: dict[tuple[int, int], tuple[int, int]] = {}
 
     def fit(self, X: np.ndarray) -> np.ndarray:
         """
@@ -109,22 +114,6 @@ class GaugingDelta:
         self._graph = NeighborGraph(X=self._X, n_neighbors=self.graph_neighbors)
         self._graph.initialize()
 
-        # Compute MIN_BTN_CLUSTER_DIST matching original's approach:
-        # Use 1st percentile of all pairwise inter-cluster distances
-        if n_samples > 1:
-            # Collect all pairwise distances (initial clusters = individual points)
-            all_dists = []
-            for i in range(n_samples):
-                for j in range(i + 1, n_samples):
-                    d = np.linalg.norm(self._X[i] - self._X[j])
-                    all_dists.append(d)
-            all_dists = sorted(all_dists)
-            # 1st percentile (matches original: DISTS[int(len(DISTS)/100)])
-            idx = max(0, int(len(all_dists) / 100))
-            self._fallback_dist = all_dists[idx] if all_dists else 0.0001
-        else:
-            self._fallback_dist = 0.0001
-
         # Initialize cluster objects
         self.clusters_ = {}
         for i in range(n_samples):
@@ -134,56 +123,45 @@ class GaugingDelta:
                 center=self._X[i].copy(),
             )
 
-        # Main merging loop - matches original's pattern exactly
-        # The original uses rounds where it processes sorted pairs
-        _debug = False  # Set True to enable debug output
-        _round = 0
+        # Initialize distance cache AND point_dists in a single O(N²) pass
+        self._init_distances_combined()
+
+        # Main merging loop: process sorted pairs in rounds
         while True:
-            _round += 1
             active_count = len(self._graph.get_active_clusters())
             pre_length = active_count
-            
-            # Check if we've reached target k clusters
+
             if self.k is not None and active_count <= self.k:
                 break
 
-            # Get all pairs sorted by distance (matches original's k_nearest_clusters)
             sorted_pairs = self._get_sorted_cluster_pairs()
             if not sorted_pairs:
-                if _debug:
-                    print(f"  Round {_round}: No pairs, breaking")
                 break
-                
+
             i = 0
             last_merged_cluster = None
-            _merges = 0
-            
+
             while i < len(sorted_pairs):
                 c_i, c_j, dist_candidate = sorted_pairs[i]
-                
-                # Check early stop for k
+
                 if self.k is not None and len(self._graph.get_active_clusters()) <= self.k:
                     break
-                
-                # Skip invalid pairs (matches legacy's inf check and diagonal skip)
+
                 if c_i == c_j or np.isinf(dist_candidate):
                     i += 1
                     continue
 
-                # Skip if either cluster is dead (legacy sets dead rows to inf)
                 if c_i in self._graph.dead_clusters or c_j in self._graph.dead_clusters:
                     i += 1
                     continue
-                
-                # Original's last_merged_cluster pattern:
-                # After a merge, check if newly merged cluster's nearest neighbor
-                # is closer than the next pair in sorted list
+
+                # After a merge, check if the merged cluster's nearest neighbor
+                # is closer than the next pair in the sorted list
                 if last_merged_cluster is not None:
                     nearest = self._get_nearest_cluster(last_merged_cluster)
                     if nearest is not None:
                         nearest_id, nearest_dist = nearest
-                        # Recompute current pair's distance (clusters may have grown)
-                        current_dist, _, _ = self._graph.get_cluster_distance(c_i, c_j)
+                        current_dist, _, _ = self._get_cached_distance(c_i, c_j)
                         if nearest_dist < current_dist:
                             c_i, c_j = last_merged_cluster, nearest_id
                         else:
@@ -194,24 +172,14 @@ class GaugingDelta:
                 else:
                     i += 1
 
-                # CRITICAL: Recompute distance fresh (clusters may have grown since round start)
-                # This matches legacy's update_clusters behavior
-                d_ij, p_i, p_j = self._graph.get_cluster_distance(c_i, c_j)
+                d_ij, p_i, p_j = self._get_cached_distance(c_i, c_j)
 
-                # Get cluster objects
                 C_i = self.clusters_[c_i]
                 C_j = self.clusters_[c_j]
 
-                # Compute mergeability
                 merge_result = self._compute_mergeability(C_i, C_j, d_ij)
 
-                if _debug and (len(C_i) <= 3 or len(C_j) <= 3):
-                    status = "ACCEPT" if merge_result.is_mergeable else "REJECT"
-                    print(f"    DEBUG ({c_i},{c_j}): {status} sizes=({len(C_i)},{len(C_j)}), rho={merge_result.rho:.4f}, T_i={merge_result.T_i:.4f}, cont={merge_result.continuity:.4f}")
-                
                 if merge_result.is_mergeable:
-                    # Determine lead (larger) and child (smaller)
-                    # For equal sizes, use first cluster in pair (c_i) as lead (matches legacy)
                     if len(C_i) >= len(C_j):
                         lead_id, child_id = c_i, c_j
                         lead_cluster, child_cluster = C_i, C_j
@@ -222,11 +190,12 @@ class GaugingDelta:
                     if self.capture_merges and self.merge_log is not None:
                         self.merge_log.append(
                             {
-                                "round": _round,
                                 "pair": (c_i, c_j),
                                 "lead_id": lead_id,
                                 "child_id": child_id,
                                 "d_ij": d_ij,
+                                "p_i": p_i,
+                                "p_j": p_j,
                                 "rho": merge_result.rho,
                                 "T_i": merge_result.T_i,
                                 "T_j": merge_result.T_j,
@@ -236,31 +205,20 @@ class GaugingDelta:
                             }
                         )
 
-                    # Update cluster data
                     self._merge_cluster_data(lead_cluster, child_cluster, d_ij)
-
-                    # Update graph
                     self._graph.merge_clusters(lead_id, child_id)
-                    
-                    # Update MIN_BTN_CLUSTER_DIST (matches original's update_clusters)
-                    # Original: self.MIN_BTN_CLUSTER_DIST = max(DIST_MATRIX.min(), MIN_BTN_CLUSTER_DIST)
-                    self._update_min_cluster_dist()
-                    
-                    _merges += 1
-                    if _debug:
-                        print(f"  Round {_round}, i={i}: MERGED ({lead_id}, {child_id}), dist={d_ij:.4f}")
-                    
-                    # Track last merged cluster for pattern
+
+                    self._graph.cluster_points[lead_id] = np.array(
+                        lead_cluster.point_indices, dtype=np.int64
+                    )
+                    if lead_cluster.center is not None:
+                        self._graph.cluster_centers[lead_id] = lead_cluster.center.copy()
+
+                    self._update_distance_cache_after_merge(lead_id, child_id)
+
                     last_merged_cluster = lead_id
-                    # Note: Do NOT re-sort here - legacy only re-sorts at outer loop start
-            
-            if _debug:
-                print(f"  Round {_round}: {_merges} merges, {len(self._graph.get_active_clusters())} clusters remaining")
-            
-            # If no merges occurred this round, break
+
             if len(self._graph.get_active_clusters()) == pre_length:
-                if _debug:
-                    print(f"  Round {_round}: No progress, breaking")
                 break
 
         # Force merge to k if specified and still have too many clusters
@@ -278,67 +236,179 @@ class GaugingDelta:
         
         Original: self.MIN_BTN_CLUSTER_DIST = max(DIST_MATRIX.min(), self.MIN_BTN_CLUSTER_DIST)
         """
-        active = list(self._graph.get_active_clusters())
-        if len(active) < 2:
+        if self._dist_matrix is None:
             return
-        
-        # Find minimum distance among active clusters
-        min_dist = float('inf')
-        for i, c_i in enumerate(active):
-            for c_j in active[i + 1:]:
-                dist, _, _ = self._graph.get_cluster_distance(c_i, c_j)
-                if dist < min_dist:
-                    min_dist = dist
-        
-        # Update fallback to max of current min and previous fallback
-        if min_dist < float('inf'):
-            self._fallback_dist = max(min_dist, self._fallback_dist)
+
+        finite = self._dist_matrix[np.isfinite(self._dist_matrix)]
+        if finite.size == 0:
+            return
+
+        min_dist = float(finite.min())
+        self._fallback_dist = max(min_dist, self._fallback_dist)
+
+    def _get_indices_of_k_smallest(
+        self,
+        matrix: np.ndarray,
+        k: int,
+        *,
+        sorted: bool = False,
+    ) -> np.ndarray:
+        """Legacy get_indices_of_k_smallest (argpartition + unravel_index)."""
+        idx = np.argpartition(matrix.ravel(), k)
+        ind = np.array(np.unravel_index(idx, matrix.shape))[:, range(min(k, 0), max(k, 0))]
+        if sorted:
+            values = matrix[tuple(ind)]
+            xx = np.argsort(values)
+            return ind[:, xx]
+        return ind
+
+    def _init_distances_combined(self) -> None:
+        """Initialize DIST_MATRIX, ref_points, point_dists, and fallback in ONE O(N²) pass.
+
+        Previously _build_point_dists and _init_distance_cache each computed all
+        N² pairwise distances independently.  This fused version halves the work.
+
+        NOTE: We use per-pair np.linalg.norm (not scipy pdist) because pdist uses
+        different FP accumulation that causes ~6% of distances to differ at the
+        last bit, which cascades into different merge orderings.
+        """
+        n_total = len(self._X)
+        self._dist_matrix = np.full((n_total, n_total), np.inf, dtype=np.float64)
+        self._ref_points = {}
+
+        build_point_dists = self.legacy_point_dists
+        if build_point_dists:
+            point_dists: list[list[tuple[int, float]]] = [[] for _ in range(n_total)]
+
+        if n_total <= 1:
+            self._fallback_dist = MIN_BTN_CLUSTER_DIST
+            self._point_dists = point_dists if build_point_dists else None
+            return
+
+        all_dists: list[float] = []
+        for i in range(n_total):
+            for j in range(i + 1, n_total):
+                dist = float(np.linalg.norm(self._X[i] - self._X[j]))
+                # Populate DIST_MATRIX
+                self._dist_matrix[i, j] = dist
+                self._dist_matrix[j, i] = dist
+                self._ref_points[(i, j)] = (i, j)
+                all_dists.append(dist)
+                # Populate point_dists (matching legacy insertion order: i<j)
+                if build_point_dists:
+                    point_dists[i].append((j, dist))
+                    point_dists[j].append((i, dist))
+
+        all_dists.sort()
+        idx = max(0, int(len(all_dists) / 100))
+        self._fallback_dist = all_dists[idx] if all_dists else MIN_BTN_CLUSTER_DIST
+
+        if build_point_dists:
+            # Legacy uses Python stable sort by distance only
+            for i in range(n_total):
+                point_dists[i].sort(key=lambda x: x[1])
+            self._point_dists = point_dists
+        else:
+            self._point_dists = None
+
+    def _get_cached_distance(self, c_i: int, c_j: int) -> tuple[float, int, int]:
+        """Return cached distance and reference points between clusters."""
+        if self._dist_matrix is None:
+            return self._graph.get_cluster_distance(c_i, c_j)
+
+        dist = float(self._dist_matrix[c_i, c_j])
+        key = (min(c_i, c_j), max(c_i, c_j))
+        ref = self._ref_points.get(key)
+
+        if np.isinf(dist) or ref is None:
+            dist, p_i, p_j = self._graph.get_cluster_distance(c_i, c_j)
+            self._dist_matrix[c_i, c_j] = dist
+            self._dist_matrix[c_j, c_i] = dist
+            if c_i <= c_j:
+                self._ref_points[key] = (int(p_i), int(p_j))
+                return float(dist), int(p_i), int(p_j)
+            self._ref_points[key] = (int(p_j), int(p_i))
+            return float(dist), int(p_j), int(p_i)
+
+        if c_i <= c_j:
+            p_i, p_j = ref
+            return dist, int(p_i), int(p_j)
+
+        p_j, p_i = ref
+        return dist, int(p_i), int(p_j)
+
+    def _update_distance_cache_after_merge(self, lead_id: int, child_id: int) -> None:
+        """Update cached distances after a merge (legacy update_clusters)."""
+        if self._dist_matrix is None:
+            return
+
+        self._dist_matrix[:, child_id] = np.inf
+        self._dist_matrix[child_id, :] = np.inf
+
+        # Clean up ref_points for dead child cluster
+        if self._ref_points:
+            dead_keys = [
+                key for key in self._ref_points
+                if key[0] == child_id or key[1] == child_id
+            ]
+            for key in dead_keys:
+                del self._ref_points[key]
+
+        active = self._graph.get_active_clusters() - {lead_id}
+        for c_id in active:
+            dist, p_i, p_j = self._graph.get_cluster_distance(lead_id, c_id)
+            self._dist_matrix[lead_id, c_id] = dist
+            self._dist_matrix[c_id, lead_id] = dist
+            key = (min(lead_id, c_id), max(lead_id, c_id))
+            if lead_id <= c_id:
+                self._ref_points[key] = (int(p_i), int(p_j))
+            else:
+                self._ref_points[key] = (int(p_j), int(p_i))
+
+        self._dist_matrix[lead_id, lead_id] = np.inf
+
+        # Legacy: self.MIN_BTN_CLUSTER_DIST = max(self.DIST_MATRIX.min(), self.MIN_BTN_CLUSTER_DIST)
+        mat_min = float(self._dist_matrix.min())
+        if np.isfinite(mat_min):
+            self._fallback_dist = max(mat_min, self._fallback_dist)
 
     def _get_sorted_cluster_pairs(self) -> list[tuple[int, int, float]]:
-        """Get all cluster pairs sorted by distance (matches legacy's exact behavior).
-        
-        Legacy uses argpartition + argsort on dense distance matrix.
-        We must use the same approach for identical tie-breaking behavior.
+        """Get cluster pairs sorted by distance.
+
+        Legacy behavior:
+        - Builds a full DIST_MATRIX sized to the original dataset (N x N)
+        - Uses get_indices_of_k_smallest(k=N) on the full matrix
+        - Includes BOTH orderings (a,b) and (b,a)
+
+        We reproduce that logic exactly, then pre-filter dead/inf entries
+        so the inner loop doesn't waste time skipping them.
         """
-        active = sorted(self._graph.get_active_clusters())
-        n_active = len(active)
-        if n_active < 2:
-            return []
-        
-        # Build distance matrix with same dimensions as original data (N x N)
-        # This matches legacy's DIST_MATRIX which is indexed by cluster IDs
-        N = len(self._X)
-        
-        dist_matrix = np.full((N, N), np.inf)
-        for c_i in active:
-            for c_j in active:
-                if c_i < c_j:
-                    # Compute actual distance (legacy computes ALL pairwise distances)
-                    dist = self._compute_cluster_distance(c_i, c_j)
-                    dist_matrix[c_i, c_j] = dist
-                    dist_matrix[c_j, c_i] = dist
-        
-        # Use argpartition + argsort to match legacy's tie-breaking behavior
-        # Legacy uses k=X.shape[0], meaning only N smallest entries are considered
-        flat = dist_matrix.ravel()
-        
-        if N <= 0:
+        if self._dist_matrix is None:
             return []
 
-        k = N
-        idx = np.argpartition(flat, k)
-        ind = np.array(np.unravel_index(idx, dist_matrix.shape))[:, :k]
-        values = dist_matrix[tuple(ind)]
-        sorted_idx = np.argsort(values)
-        ind = ind[:, sorted_idx]
+        active = self._graph.get_active_clusters()
+        if len(active) < 2:
+            return []
 
-        pairs = []
-        for col in range(ind.shape[1]):
-            r = int(ind[0, col])
-            c = int(ind[1, col])
-            pairs.append((r, c, float(dist_matrix[r, c])))
+        dead = self._graph.dead_clusters
 
-        return pairs
+        # Legacy: get_indices_of_k_smallest(k=N, sorted=True)
+        k = len(self._X)
+        ind = self._get_indices_of_k_smallest(self._dist_matrix, k, sorted=True)
+        values = self._dist_matrix[tuple(ind)]
+
+        # Pre-filter: skip inf values and dead clusters (avoids inner-loop churn)
+        result = []
+        for pos in range(ind.shape[1]):
+            v = values[pos]
+            if np.isinf(v):
+                break  # All subsequent values are >= this one (sorted)
+            ci = int(ind[0, pos])
+            cj = int(ind[1, pos])
+            if ci == cj or ci in dead or cj in dead:
+                continue
+            result.append((ci, cj, float(v)))
+        return result
     
     def _get_nearest_cluster(self, cluster_id: int) -> tuple[int, float] | None:
         """Get nearest active cluster to given cluster."""
@@ -348,17 +418,24 @@ class GaugingDelta:
         active = self._graph.get_active_clusters() - {cluster_id}
         if not active:
             return None
-            
-        min_dist = float('inf')
-        nearest_id = None
-        
-        for c_id in active:
-            dist, _, _ = self._graph.get_cluster_distance(cluster_id, c_id)
-            if dist < min_dist:
-                min_dist = dist
-                nearest_id = c_id
-        
-        return (nearest_id, min_dist) if nearest_id is not None else None
+
+        if self._dist_matrix is None:
+            n_total = len(self._X)
+            dist_row = np.full(n_total, np.inf)
+            for c_id in active:
+                dist_row[c_id] = self._get_cached_distance(cluster_id, c_id)[0]
+        else:
+            dist_row = self._dist_matrix[cluster_id].copy()
+            dist_row[cluster_id] = np.inf
+            if self._graph.dead_clusters:
+                dead = np.fromiter(self._graph.dead_clusters, dtype=int)
+                dist_row[dead] = np.inf
+
+        ind = self._get_indices_of_k_smallest(dist_row, 1, sorted=True)
+        nearest_id = int(ind[:, 0][0]) if ind.size else None
+        if nearest_id is None or np.isinf(dist_row[nearest_id]):
+            return None
+        return (nearest_id, float(dist_row[nearest_id]))
 
     def _compute_cluster_distance(self, c_i: int, c_j: int) -> float:
         """Compute minimum distance between two clusters' points.
@@ -526,7 +603,7 @@ class GaugingDelta:
             key = (min(a_id, b_id), max(a_id, b_id))
             if key in distance_cache:
                 return distance_cache[key]
-            dist, _, _ = self._graph.get_cluster_distance(a_id, b_id)
+            dist, _, _ = self._get_cached_distance(a_id, b_id)
             distance_cache[key] = dist
             return dist
 
@@ -545,24 +622,29 @@ class GaugingDelta:
             if k_neighbors <= 0:
                 return []
             n_total = len(self._X)
-            dist_row = np.full(n_total, np.inf)
-            for other_id in active_ids:
-                if other_id == cluster_id:
-                    continue
-                dist_row[other_id] = _get_near_distance_by_id(cluster_id, other_id)
+            if self._dist_matrix is not None:
+                dist_row = self._dist_matrix[cluster_id].copy()
+                dist_row[cluster_id] = np.inf
+                if self._graph.dead_clusters:
+                    dead = np.fromiter(self._graph.dead_clusters, dtype=int)
+                    dist_row[dead] = np.inf
+            else:
+                dist_row = np.full(n_total, np.inf)
+                for other_id in active_ids:
+                    if other_id == cluster_id:
+                        continue
+                    dist_row[other_id] = _get_near_distance_by_id(cluster_id, other_id)
 
             k = min(k_neighbors, n_total - 1)
             if k <= 0:
                 return []
 
-            idx = np.argpartition(dist_row, k)
-            indices = idx[:k]
-            values = dist_row[indices]
-            ordered = indices[np.argsort(values)]
+            ind = self._get_indices_of_k_smallest(dist_row, k, sorted=True)
+            indices = ind[:, range(min(k, 0), max(k, 0))][0]
 
             return [
                 (int(cid), float(dist_row[cid]))
-                for cid in ordered
+                for cid in indices
                 if not np.isinf(dist_row[cid])
             ]
 
@@ -590,7 +672,6 @@ class GaugingDelta:
         # Step 3: Compute adaptive thresholds
         T_i = compute_adaptive_threshold_T(C_lead, beta_ij, xi_s)
         T_j = compute_adaptive_threshold_T(C_child, beta_ij, xi_s)
-        
 
         # Step 4: Check proximity threshold
         if rho > T_i or rho > T_j:
@@ -616,12 +697,19 @@ class GaugingDelta:
             lead_cluster, child_cluster = C_j, C_i
         
         # Find reference points (closest points between clusters)
-        _, p_lead, p_child = self._graph.get_cluster_distance(lead_cluster.label, child_cluster.label)
+        _, p_lead, p_child = self._get_cached_distance(lead_cluster.label, child_cluster.label)
 
-        T_adaptive = (T_i + T_j) / 2
+        # Legacy: adp_prox = T1 * size1/(size1+size2) + T2 * size2/(size1+size2)
+        size_lead = len(lead_cluster)
+        size_child = len(child_cluster)
+        total_size = size_lead + size_child
+        T_adaptive = T_i * size_lead / total_size + T_j * size_child / total_size
         shape_diff = xi_s if xi_s > 0 else 1.0
+        
+        # Legacy passes distance/proximity = mean_past_dist, not raw d_ij
+        # distance/proximity = d_ij / (d_ij / mean_historical) = mean_historical
+        mean_historical = d_ij / rho if rho > 0 else d_ij
 
-        _cont_debug = False  # Disable for now
         continuity = compute_continuity(
             lead_cluster,
             child_cluster,
@@ -629,9 +717,10 @@ class GaugingDelta:
             p_child,
             self._X,
             self.T_continuity / shape_diff,
-            d_ij,
+            mean_historical,
             T_adaptive,
-            _debug=_cont_debug,
+            kdtree=self._graph.kdtree,
+            point_dists=self._point_dists,
         )
 
         # Step 6: Final decision

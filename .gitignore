@@ -165,6 +165,10 @@ cython_debug/
 # VSCode
 .vscode/
 
+# Benchmark results
+benchmarks/results/
+*.prof
+
 # Windsurf
 .windsurf/
 

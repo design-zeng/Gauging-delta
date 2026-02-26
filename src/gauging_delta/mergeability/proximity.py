@@ -113,12 +113,16 @@ def _compute_historical_mean(
     if n_i <= 2 and n_j <= 2:
         return fallback
 
-    # Combine recent entries from both histories
-    recent_i = history_i[-n:] if n > 0 else []
-    recent_j = history_j[-n:] if n > 0 else []
-    combined = recent_i + recent_j
-
-    if len(combined) == 0:
+    if n <= 0:
         return fallback
 
-    return float(np.mean(combined))
+    # Compute mean without list concatenation
+    recent_i = history_i[-n:]
+    recent_j = history_j[-n:]
+    count = len(recent_i) + len(recent_j)
+    
+    if count == 0:
+        return fallback
+
+    total = sum(recent_i) + sum(recent_j)
+    return total / count

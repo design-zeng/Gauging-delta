@@ -4,7 +4,7 @@ version = "0.1.0"
 description = "Gauging-δ: A Non-Parametric Hierarchical Clustering Algorithm"
 readme = "README.md"
 license = {text = "MIT"}
-requires-python = ">=3.9"
+requires-python = ">=3.13"
 authors = [
     {name = "Jinli Yao"},
     {name = "Jie Pan"},
@@ -16,14 +16,12 @@ classifiers = [
     "Intended Audience :: Science/Research",
     "License :: OSI Approved :: MIT License",
     "Programming Language :: Python :: 3",
-    "Programming Language :: Python :: 3.9",
-    "Programming Language :: Python :: 3.10",
-    "Programming Language :: Python :: 3.11",
-    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
     "Topic :: Scientific/Engineering :: Artificial Intelligence",
 ]
 
 dependencies = [
+    "matplotlib>=3.9.4",
     "numpy>=1.24.0",
     "scikit-learn>=1.6.1",
     "scipy>=1.10.0",
@@ -34,16 +32,17 @@ dev = [
     "pytest>=7.0.0",
     "hypothesis>=6.0.0",
     "pytest-cov>=4.0.0",
+    "pytest-benchmark>=4.0.0",
     "mypy>=1.0.0",
     "ruff>=0.4.0",
     "pre-commit>=3.0.0",
 ]
-viz = [
-    "matplotlib>=3.7.0",
-    "scikit-learn>=1.0.0",  # For PCA projection
+bench = [
+    "psutil>=5.9.0",
+    "scienceplots>=2.1.0",
 ]
 all = [
-    "gauging-delta[dev,viz]",
+    "gauging-delta[dev,bench]",
 ]
 
 [project.urls]
@@ -63,12 +62,15 @@ testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_functions = ["test_*"]
 addopts = "-v --tb=short"
+markers = [
+    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+]
 filterwarnings = [
     "ignore::DeprecationWarning",
 ]
 
 [tool.mypy]
-python_version = "3.9"
+python_version = "3.13"
 warn_return_any = true
 warn_unused_configs = true
 warn_redundant_casts = true
@@ -85,7 +87,7 @@ disallow_untyped_defs = false
 
 [tool.ruff]
 line-length = 100
-target-version = "py39"
+target-version = "py313"
 src = ["src", "tests"]
 exclude = [
     ".git",
@@ -93,7 +95,6 @@ exclude = [
     "__pycache__",
     "build",
     "dist",
-    "legacy",
 ]
 
 [tool.ruff.lint]
@@ -150,5 +151,5 @@ exclude_lines = [
 ]
 
 [tool.bandit]
-exclude_dirs = ["tests", "legacy"]
+exclude_dirs = ["tests"]
 skips = ["B101"]  # Allow assert statements
