@@ -172,6 +172,10 @@ benchmarks/results/
 # Windsurf
 .windsurf/
 
+# Claude Code
+.claude/
+CLAUDE.md
+
 # Obsidian
 .obsidian/
 

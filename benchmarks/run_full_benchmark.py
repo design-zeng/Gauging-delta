@@ -116,8 +116,8 @@ def _run_single(version: str, X: "np.ndarray") -> tuple["np.ndarray", float, flo
         model.fit(X.copy())
         labels = np.asarray(model.labels_, dtype=int)
     elif version == "max_fast":
-        from gauging_delta import GaugingDeltaFast
-        model = GaugingDeltaFast(preserve_labels=True)
+        from gauging_delta import GaugingDelta as GaugingDeltaFallback
+        model = GaugingDeltaFallback(preserve_labels=True)
         model.fit(X.copy())
         labels = np.asarray(model.labels_, dtype=int)
     else:

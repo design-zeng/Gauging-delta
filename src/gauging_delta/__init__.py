@@ -1,24 +1,18 @@
-"""
-Gauging-δ: A Non-Parametric Hierarchical Clustering Algorithm
+"""Gauging-delta: non-parametric hierarchical clustering."""
 
-This package implements the Gauging-δ clustering algorithm as described in:
-    Yao, Pan, Zeng. "Gauging-δ: A Non-Parametric Hierarchical Clustering Algorithm"
-    IEEE Transactions on Pattern Analysis and Machine Intelligence, Vol. 47, No. 6, June 2025
-
-The algorithm employs a hierarchical merging process guided by an adaptive
-mergeability function that considers proximity and continuity statistics.
-"""
-
-from gauging_delta.core.algorithm import GaugingDelta
-from gauging_delta.core.algorithm_fast import GaugingDeltaFast
-from gauging_delta.core.cluster import Cluster, ClusterPairInfo, MergeabilityResult
+from gauging_delta.algorithm import GaugingDelta
+from gauging_delta.cluster import Cluster
+from gauging_delta.config import GaugingDeltaConfig
+from gauging_delta.continuity import DefaultContinuity
+from gauging_delta.linkage import DefaultLinkage
+from gauging_delta.proximity import DefaultProximity
 
 
-__version__ = "0.1.0"
 __all__ = [
     "Cluster",
-    "ClusterPairInfo",
+    "DefaultContinuity",
+    "DefaultLinkage",
+    "DefaultProximity",
     "GaugingDelta",
-    "GaugingDeltaFast",
-    "MergeabilityResult",
+    "GaugingDeltaConfig",
 ]

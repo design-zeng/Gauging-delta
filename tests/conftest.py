@@ -1,7 +1,11 @@
-"""
-Pytest configuration and shared fixtures for Gauging-δ tests.
+"""Shared fixtures for Gauging-delta tests.
+
+Session-scoped legacy results to avoid re-running Perception.fit() per test.
 """
 
+from __future__ import annotations
+
+import io
 import sys
 from pathlib import Path
 
@@ -9,74 +13,58 @@ import numpy as np
 import pytest
 
 
-# Add src to path for imports
-sys.path.insert(0, str(Path(__file__).parent.parent / "src"))
+# Ensure the repo root (containing perception.py) is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-# Add project root for perception.py (parity tests)
-sys.path.insert(0, str(Path(__file__).parent.parent))
+DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
-
-@pytest.fixture
-def sample_2d_data():
-    """Simple 2D dataset with 3 clear clusters."""
-    np.random.seed(42)
-    cluster1 = np.random.randn(20, 2) + np.array([0, 0])
-    cluster2 = np.random.randn(20, 2) + np.array([5, 0])
-    cluster3 = np.random.randn(20, 2) + np.array([2.5, 5])
-    return np.vstack([cluster1, cluster2, cluster3])
+BENCHMARK_DATASETS = {
+    "flame": DATA_DIR / "flame.txt",
+    "3_blobs": DATA_DIR / "3_blobs.txt",
+    "pathbased": DATA_DIR / "pathbased.txt",
+    "3-spiral": DATA_DIR / "3-spiral.txt",
+    "jain": DATA_DIR / "jain.txt",
+    "compound": DATA_DIR / "compound.txt",
+}
 
 
-@pytest.fixture
-def sample_3d_data():
-    """Simple 3D dataset with 2 clear clusters."""
-    np.random.seed(42)
-    cluster1 = np.random.randn(15, 3) + np.array([0, 0, 0])
-    cluster2 = np.random.randn(15, 3) + np.array([5, 5, 5])
-    return np.vstack([cluster1, cluster2])
+def _load_dataset(path: Path) -> tuple[np.ndarray, np.ndarray]:
+    """Load (X, y_true) from a comma-separated txt file."""
+    data = np.loadtxt(str(path), delimiter=",")
+    return data[:, :2], data[:, 2].astype(int)
 
 
-@pytest.fixture
-def collinear_points():
-    """Points arranged in a line (for angle tests)."""
-    return np.array(
-        [
-            [0, 0],
-            [1, 0],
-            [2, 0],
-            [3, 0],
-        ]
-    )
+def _run_legacy(X: np.ndarray) -> np.ndarray:
+    """Run Perception.fit and extract raw cluster labels."""
+    from perception import Perception
+
+    old_stdout = sys.stdout
+    sys.stdout = io.StringIO()
+    try:
+        p = Perception(k=None)
+        p.fit(X)
+    finally:
+        sys.stdout = old_stdout
+
+    labels = np.full(len(X), -1, dtype=int)
+    for cid, cl in p.initial_clusters.items():
+        for pt in cl["data"]:
+            labels[pt] = cid
+    return labels
 
 
-@pytest.fixture
-def right_angle_points():
-    """Points forming a right angle."""
-    return np.array(
-        [
-            [0, 0],  # origin
-            [1, 0],  # along x-axis
-            [0, 1],  # along y-axis
-        ]
-    )
+# ---------------------------------------------------------------------------
+# Session-scoped fixtures: run legacy ONCE per dataset per test session
+# ---------------------------------------------------------------------------
 
 
-@pytest.fixture
-def load_test_datasets():
-    """Load all test datasets from data/ directory."""
-    data_dir = Path(__file__).parent.parent / "data"
-    datasets = {}
-    for file in data_dir.glob("*.txt"):
-        # Try comma delimiter first, then whitespace
-        try:
-            data = np.loadtxt(file, delimiter=",")
-        except ValueError:
-            data = np.loadtxt(file)
-        # Assume last column is label if present
-        if data.shape[1] > 2:
-            X = data[:, :-1]
-            y = data[:, -1]
-        else:
-            X = data
-            y = None
-        datasets[file.stem] = {"X": X, "y": y}
-    return datasets
+@pytest.fixture(scope="session")
+def datasets() -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """All benchmark datasets as {name: (X, y_true)}."""
+    return {name: _load_dataset(path) for name, path in BENCHMARK_DATASETS.items()}
+
+
+@pytest.fixture(scope="session")
+def legacy_labels(datasets: dict) -> dict[str, np.ndarray]:
+    """Legacy labels for all benchmark datasets, computed once per session."""
+    return {name: _run_legacy(X) for name, (X, _) in datasets.items()}

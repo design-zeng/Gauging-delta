@@ -4,7 +4,7 @@ Unified benchmark: Runtime, Space, and Parity for three Gauging-δ versions.
 Compares:
   1. Original   – perception.py (Perception class)
   2. Max-Parity – GaugingDelta  (100% ARI vs original)
-  3. Max-Fast   – GaugingDeltaFast (vectorized, KDTree, heap)
+  3. Max-Fast   – GaugingDelta (same as max-parity; Fast variant was removed)
 
 Generates publication-quality plots with SciencePlots and saves raw
 results to JSON for reproducibility.
@@ -143,14 +143,14 @@ def _run_max_parity(X: np.ndarray) -> tuple[np.ndarray, float, float]:
 
 
 def _run_max_fast(X: np.ndarray) -> tuple[np.ndarray, float, float]:
-    """Run GaugingDeltaFast (max-optimized) and return (labels, time_s, peak_bytes)."""
-    from gauging_delta import GaugingDeltaFast
+    """Run GaugingDelta (same as max_parity — GaugingDeltaFast was removed)."""
+    from gauging_delta import GaugingDelta
 
     gc.collect()
     tracemalloc.start()
     t0 = time.perf_counter()
 
-    model = GaugingDeltaFast(preserve_labels=True)
+    model = GaugingDelta(preserve_labels=True)
     model.fit(X.copy())
 
     elapsed = time.perf_counter() - t0
@@ -380,7 +380,7 @@ def fit_best_model(
 VERSION_LABELS = {
     "original": "Original (Perception)",
     "max_parity": "Max-Parity (GaugingDelta)",
-    "max_fast": "Max-Fast (GaugingDeltaFast)",
+    "max_fast": "Max-Fast (GaugingDelta)",
 }
 VERSION_COLORS = {
     "original": "#d62728",
