@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity
 
 # Default target
 help:
@@ -23,6 +23,7 @@ help:
 	@echo "  make bench-parity-deep Parity benchmark (component level)"
 	@echo "  make bench-stress      Stress test (100 configs)"
 	@echo "  make bench-stress-deep Stress test (deep mode)"
+	@echo "  make gate-parity       Gate-by-gate parity verification"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make all        Install and run all checks"
 	@echo ""
@@ -84,6 +85,9 @@ bench-stress:
 
 bench-stress-deep:
 	uv run python benchmarks/stress_test.py --deep
+
+gate-parity:
+	uv run python benchmarks/gate_parity.py
 
 # Combined checks
 check: lint typecheck test

@@ -149,11 +149,9 @@ def _compute_force(
     if key not in clusters_dist:
         return 0.0
     d = clusters_dist[key]["distance_info"]["mix_dist"]["distance"]
-    if d == 0:
-        return 0.0
     m1 = len(all_clusters[c1_id])
     m2 = len(all_clusters[c2_id])
-    return float(m1 * m2 / (d**2))
+    return float(np.float64(m1 * m2) / np.float64(d) ** 2)
 
 
 def _near_dist(c1_id: int, c2_id: int, clusters_dist: dict) -> float:
