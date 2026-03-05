@@ -135,49 +135,62 @@ class GaugingDelta:
     # ----- Distance initialisation -----------------------------------------
 
     def _init_distances(self) -> None:
-        """Port of ``initiate_dists`` (perception.py L176-220)."""
-        n = len(self._X)
-        all_dists: list[float] = []
+        """Port of ``initiate_dists`` (perception.py L176-220).
 
+        For singleton clusters, near_dist = center_dist = |X[i] - X[j]|.
+        We compute all pairwise distances in one vectorized call via
+        scipy.spatial.distance.cdist, then populate the dict structures.
+        """
+        from scipy.spatial.distance import cdist
+
+        n = len(self._X)
+
+        # Vectorized pairwise distances — O(N²·D) in one C call
+        pairwise = cdist(self._X, self._X)  # (N, N)
+        self._dist_matrix = pairwise.copy()
+        np.fill_diagonal(self._dist_matrix, np.inf)
+
+        # Populate clusters_dist and point_dists from the dense matrix
         keys = list(self._clusters.keys())
         for idx_i in range(n):
+            ci = keys[idx_i]
+            pd_list: list[list] = []
             for idx_j in range(idx_i + 1, n):
-                ci, cj = keys[idx_i], keys[idx_j]
-                lr = compute_linkage(self._clusters[ci], self._clusters[cj], self._X)
+                cj = keys[idx_j]
+                d = float(pairwise[idx_i, idx_j])
 
+                # For singletons: near_dist = center_dist = mix_dist = d
+                # near_ref points are the points themselves; center_ref = -1 (dead)
                 self._clusters_dist[frozenset((ci, cj))] = {
                     "distance_info": {
                         "near_dist": {
-                            "distance": lr.near_dist,
-                            "reference_points": {ci: lr.near_ref_c1, cj: lr.near_ref_c2},
+                            "distance": d,
+                            "reference_points": {ci: ci, cj: cj},
                         },
                         "center_dist": {
-                            "distance": lr.center_dist,
-                            "reference_points": {ci: lr.center_ref_c1, cj: lr.center_ref_c2},
+                            "distance": d,
+                            "reference_points": {ci: -1, cj: -1},
                         },
                         "mix_dist": {
-                            "distance": lr.mix_dist,
-                            "reference_points": {ci: lr.mix_ref_c1, cj: lr.mix_ref_c2},
+                            "distance": d,
+                            "reference_points": {ci: ci, cj: cj},
                         },
                     }
                 }
 
-                d = lr.near_dist
-                self._dist_matrix[idx_j, idx_i] = d
-                self._dist_matrix[idx_i, idx_j] = d
-
-                self._point_dists.setdefault(ci, []).append([cj, d])
+                pd_list.append([cj, d])
                 self._point_dists.setdefault(cj, []).append([ci, d])
 
-                all_dists.append(d)
+            self._point_dists[ci] = pd_list + self._point_dists.get(ci, [])
 
         # Sort point_dists per point (perception.py L217-218)
         for k in self._point_dists:
             self._point_dists[k].sort(key=lambda x: x[1])
 
         # MIN_BTN_CLUSTER_DIST (perception.py L213)
-        all_dists.sort()
-        self._fallback_dist = all_dists[int(len(all_dists) * self.config.min_dist_percentile)]
+        upper = pairwise[np.triu_indices(n, k=1)]
+        upper.sort()
+        self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
 
     # ----- Sorted pairs ----------------------------------------------------
 

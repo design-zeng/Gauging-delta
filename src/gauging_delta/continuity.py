@@ -11,7 +11,7 @@ import math
 
 import numpy as np
 
-from gauging_delta.angles import compute_angle
+from gauging_delta.angles import compute_angle, compute_angle_batch
 from gauging_delta.cluster import Cluster
 from gauging_delta.config import GaugingDeltaConfig
 
@@ -248,21 +248,29 @@ def _find_local_points(
 
     Returns (n, 2) array: columns are [point_index, angle].
     """
-    local_points: list[list[float]] = []
-    ref = X[point]
-
+    # Collect candidates within radius (point_dists is pre-sorted by distance)
+    candidates = []
     for p_dist in point_dists[point]:
-        p_idx = int(p_dist[0])
-        dist = p_dist[1]
-
-        if dist > radius:
+        if p_dist[1] > radius:
             break
+        candidates.append(int(p_dist[0]))
 
-        angle = compute_angle(middle_point, ref, X[p_idx], rounding=4)
+    if not candidates:
+        return np.empty((0, 2))
 
+    # Batch angle computation (angle is symmetric in left/right)
+    cand_indices = np.array(candidates)
+    angles = compute_angle_batch(middle_point, X[cand_indices], X[point], rounding=4)
+
+    # Filter by angle criteria
+    local_points: list[list[float]] = []
+    half_pi = math.pi / 2
+    three_half_pi = 3 * math.pi / 2
+    for i, p_idx in enumerate(candidates):
+        angle = float(angles[i])
         if not find_all:
-            if (angle <= math.pi / 2 or angle >= 3 * math.pi / 2) and p_idx != exclude_point:
-                _angle = angle if angle <= math.pi / 2 else angle - 2 * math.pi
+            if (angle <= half_pi or angle >= three_half_pi) and p_idx != exclude_point:
+                _angle = angle if angle <= half_pi else angle - 2 * math.pi
                 local_points.append([p_idx, _angle])
         else:
             angle = angle if angle <= math.pi else angle - 2 * math.pi
@@ -295,11 +303,11 @@ def _contain_outliers(
     """Port of ``contain_outliers`` (perception.py L1017-1023)."""
     last_angle = local_points[-1][1]
     last_point = int(local_points[-1][0])
-    for i in range(len(local_points) - 1):
-        theta = compute_angle(middle_point, X[last_point], X[int(local_points[i][0])])
-        if theta < last_angle / 2:
-            return False
-    return True
+    if len(local_points) <= 1:
+        return True
+    indices = local_points[:-1, 0].astype(int)
+    thetas = compute_angle_batch(middle_point, X[indices], X[last_point])
+    return not np.any(thetas < last_angle / 2)
 
 
 def _compute_max_angle(
@@ -315,10 +323,14 @@ def _compute_max_angle(
     max_p1 = int(local_points[-1][0])
     max_angle1 = local_points[-1][1]
 
-    for i in reversed(range(len(local_points) - 1)):
-        angle = compute_angle(X[ref_point], X[max_p1], X[int(local_points[i][0])])
-        if angle > max_angle1:
-            return max_p1, int(local_points[i][0]), angle
+    if len(local_points) > 1:
+        indices = local_points[:-1, 0].astype(int)
+        angles = compute_angle_batch(X[ref_point], X[indices], X[max_p1])
+        # Reversed iteration: find largest index where angle > max_angle1
+        exceeds = np.where(angles > max_angle1)[0]
+        if len(exceeds) > 0:
+            idx = int(exceeds[-1])
+            return max_p1, int(local_points[idx][0]), float(angles[idx])
 
     # Fallback: compare last with first (perception.py L709-710)
     angle = compute_angle(X[ref_point], X[max_p1], X[int(local_points[0][0])])
@@ -362,14 +374,18 @@ def _find_smallest_angle(
     X: np.ndarray,
 ) -> float:
     """Port of inner ``find_smallest_angle`` (perception.py L1046-1053)."""
-    angle = math.pi
-    for v in points:
-        v_idx = int(v[0])
-        theta = compute_angle(start_p, X[p], X[v_idx])
-        r_theta = compute_angle(start_p, X[rp], X[v_idx])
-        if theta < angle and r_theta >= theta:
-            angle = theta
-    return angle
+    if len(points) == 0:
+        return math.pi
+
+    v_indices = points[:, 0].astype(int)
+    thetas = compute_angle_batch(start_p, X[v_indices], X[p])
+    r_thetas = compute_angle_batch(start_p, X[v_indices], X[rp])
+
+    # Find minimum theta where r_theta >= theta
+    mask = r_thetas >= thetas
+    if np.any(mask):
+        return float(np.min(thetas[mask]))
+    return math.pi
 
 
 def _compute_transition_smoothness(
