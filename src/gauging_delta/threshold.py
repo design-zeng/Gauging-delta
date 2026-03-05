@@ -129,7 +129,7 @@ def _compute_vision_scale(
     # Weighted vision scale (perception.py L392-396)
     vs = 0.0
     for weight, avg_d in cont_clusters:
-        dist_ratio = d_ij / avg_d if avg_d != 0 else 1.0
+        dist_ratio = d_ij / avg_d if avg_d != 0 else cfg.vision_scale_dist_ratio_fallback
         _vs = (
             cfg.vision_scale_coeff / (1 + math.e ** (cfg.vision_scale_exp * dist_ratio))
             + cfg.vision_scale_offset

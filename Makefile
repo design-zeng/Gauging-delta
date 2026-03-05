@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep
 
 # Default target
 help:
@@ -19,6 +19,10 @@ help:
 	@echo "  make benchmark  Run full benchmarks (standalone)"
 	@echo "  make bench-test Run benchmark tests (pytest)"
 	@echo "  make bench-full Run full benchmark suite (60 GB RAM)"
+	@echo "  make bench-parity      Parity benchmark (holistic)"
+	@echo "  make bench-parity-deep Parity benchmark (component level)"
+	@echo "  make bench-stress      Stress test (100 configs)"
+	@echo "  make bench-stress-deep Stress test (deep mode)"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make all        Install and run all checks"
 	@echo ""
@@ -68,6 +72,18 @@ bench-test:
 
 bench-full:
 	uv run --extra bench python benchmarks/run_full_benchmark.py
+
+bench-parity:
+	uv run python benchmarks/benchmark_parity.py
+
+bench-parity-deep:
+	uv run python benchmarks/benchmark_parity.py --level component --sizes 100 500 1000
+
+bench-stress:
+	uv run python benchmarks/stress_test.py
+
+bench-stress-deep:
+	uv run python benchmarks/stress_test.py --deep
 
 # Combined checks
 check: lint typecheck test

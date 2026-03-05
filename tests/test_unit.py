@@ -140,6 +140,53 @@ class TestConfig:
         with pytest.raises(AttributeError):
             cfg.threshold_continuity = 0.5  # type: ignore[misc]
 
+    def test_compactness_defaults(self) -> None:
+        """Compactness fields match legacy hardcoded constants."""
+        cfg = GaugingDeltaConfig()
+        assert cfg.compact_fallback == 0.5
+        assert cfg.compact_min_size == 2
+        assert cfg.compact_history_window == 5
+
+    def test_compactness_override(self) -> None:
+        cfg = GaugingDeltaConfig(compact_fallback=0.8, compact_min_size=4, compact_history_window=10)
+        assert cfg.compact_fallback == 0.8
+        assert cfg.compact_min_size == 4
+        assert cfg.compact_history_window == 10
+
+    def test_transition_defaults(self) -> None:
+        """Transition smoothness fields match legacy hardcoded constants."""
+        cfg = GaugingDeltaConfig()
+        assert cfg.transition_external_zero_fallback == 2.0
+        assert cfg.transition_lopsided_override == 1.5
+        assert cfg.transition_lopsided_ratio == 0.1
+
+    def test_transition_override(self) -> None:
+        cfg = GaugingDeltaConfig(
+            transition_external_zero_fallback=3.0,
+            transition_lopsided_override=2.0,
+            transition_lopsided_ratio=0.2,
+        )
+        assert cfg.transition_external_zero_fallback == 3.0
+        assert cfg.transition_lopsided_override == 2.0
+        assert cfg.transition_lopsided_ratio == 0.2
+
+    def test_vision_scale_and_boundary_defaults(self) -> None:
+        """Vision scale fallback, boundary threshold, and mass ratio jump."""
+        cfg = GaugingDeltaConfig()
+        assert cfg.vision_scale_dist_ratio_fallback == 1.0
+        assert cfg.boundary_threshold == 2.0
+        assert cfg.mass_ratio_jump == pytest.approx(math.e)
+
+    def test_vision_scale_and_boundary_override(self) -> None:
+        cfg = GaugingDeltaConfig(
+            vision_scale_dist_ratio_fallback=2.0,
+            boundary_threshold=3.0,
+            mass_ratio_jump=3.0,
+        )
+        assert cfg.vision_scale_dist_ratio_fallback == 2.0
+        assert cfg.boundary_threshold == 3.0
+        assert cfg.mass_ratio_jump == 3.0
+
 
 # ---------------------------------------------------------------------------
 # Swappable components

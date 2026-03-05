@@ -57,6 +57,33 @@ class GaugingDeltaConfig:
     outlier_min_points: int = 3  # need > 3 local points to check (perception.py L1039)
     max_angle_zero_threshold: float = 0.2  # (perception.py L812)
 
+    # --- Compactness (continuity) ---
+    # Compactness estimate for clusters with too few points to compute
+    # sigma/mean statistics reliably
+    compact_fallback: float = 0.5
+    # Minimum cluster size (in points) required to compute compactness
+    # from merge statistics. Below this, compact_fallback is used.
+    compact_min_size: int = 2
+    # Number of recent merge distances used to estimate compactness
+    # at each cluster. Larger = smoother but less responsive.
+    compact_history_window: int = 5
+
     # --- Transition smoothness ---
     boundary_threshold: float = 2.0  # transition > 2 = boundary (perception.py L840)
     mass_ratio_jump: float = 2.718281828  # e ~ np.e (perception.py L857)
+    # Transition smoothness returned when external point count is zero
+    # on either side. Indicates likely merge-safe boundary (no evidence
+    # of a barrier between clusters).
+    transition_external_zero_fallback: float = 2.0
+    # Transition smoothness when one external distribution is <= the
+    # lopsided ratio of the internal distributions, indicating an
+    # asymmetric boundary (one cluster extends much further than the other).
+    transition_lopsided_override: float = 1.5
+    # Ratio threshold for detecting lopsided external distributions.
+    # If external/internal <= this value, use transition_lopsided_override.
+    transition_lopsided_ratio: float = 0.1
+
+    # --- Vision scale (threshold) ---
+    # dist_ratio fallback in vision scale when average contextual
+    # distance is zero. Avoids division by zero in the sigmoid.
+    vision_scale_dist_ratio_fallback: float = 1.0

@@ -64,19 +64,19 @@ def _compute_local_transition(
     middle_point = (X[p1] + X[p2]) / 2
 
     # --- Compactness (L728-745) ---
-    past_dists = [*lead.merge_history[-5:], *child.merge_history[-5:]]
+    past_dists = [*lead.merge_history[-cfg.compact_history_window:], *child.merge_history[-cfg.compact_history_window:]]
     size1, size2 = len(lead), len(child)
 
-    if size1 > 2:
+    if size1 > cfg.compact_min_size:
         mean_pd1 = float(np.mean(lead.merge_history))
         compact1 = (lead.sigma_history[-1] / mean_pd1 / math.log(size1)) * size1 / (size1 + size2)
     else:
-        compact1 = 0.5
-    if size2 > 2:
+        compact1 = cfg.compact_fallback
+    if size2 > cfg.compact_min_size:
         mean_pd2 = float(np.mean(child.merge_history))
         compact2 = (child.sigma_history[-1] / mean_pd2 / math.log(size2)) * size2 / (size1 + size2)
     else:
-        compact2 = 0.5
+        compact2 = cfg.compact_fallback
     compact = compact1 + compact2
 
     # --- Base length / enlarge rate (L747-753) ---
@@ -389,15 +389,15 @@ def _compute_transition_smoothness(
         p1, p2, middle_point, N1, N2, radius, X, point_dists
     )
     if r_e == 0 or g_e == 0:
-        return max(2.0, (max(N1, N2) / min(N1, N2)) / r_rate) if r_rate != 0 else 2.0
+        return max(cfg.transition_external_zero_fallback, (max(N1, N2) / min(N1, N2)) / r_rate) if r_rate != 0 else cfg.transition_external_zero_fallback
     elif ((r_i < g_i or r_i < g_e) and r_i < r_e) or (g_i < g_e and (g_i < r_i or g_i < r_e)):
         return min(
             min(r_i, g_i) / max(g_i, g_e) if max(g_i, g_e) != 0 else 0.0,
             min(r_i, g_i) / max(r_i, r_e) if max(r_i, r_e) != 0 else 0.0,
         )
     else:
-        if r_e / max(g_i, g_e, r_i) <= 0.1 or g_e / max(g_i, r_e, r_i) <= 0.1:
-            return 1.5
+        if r_e / max(g_i, g_e, r_i) <= cfg.transition_lopsided_ratio or g_e / max(g_i, r_e, r_i) <= cfg.transition_lopsided_ratio:
+            return cfg.transition_lopsided_override
         return 1.0
 
 
