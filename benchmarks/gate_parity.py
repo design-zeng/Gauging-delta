@@ -367,9 +367,14 @@ def _compare_attempts(
     dataset: str,
     *,
     quick: bool = False,
+    gate_filter: list[int] | None = None,
 ) -> list[GateDivergence]:
-    """Compare gate outputs attempt-by-attempt. Returns all divergences."""
+    """Compare gate outputs attempt-by-attempt. Returns all divergences.
+
+    If *gate_filter* is given, only those gates are compared (e.g. [2, 3]).
+    """
     divergences: list[GateDivergence] = []
+    gates_to_check = gate_filter if gate_filter else [2, 3, 4, 5, 6]
 
     n = min(len(legacy_attempts), len(new_attempts))
     if len(legacy_attempts) != len(new_attempts):
@@ -389,7 +394,7 @@ def _compare_attempts(
         la = legacy_attempts[i]
         na = new_attempts[i]
 
-        # Check pair alignment first
+        # Check pair alignment first (always checked — prerequisite for gate comparison)
         if la.c1 != na.c1 or la.c2 != na.c2:
             divergences.append(
                 GateDivergence(
@@ -403,8 +408,8 @@ def _compare_attempts(
             )
             break  # Pairs diverged — cascade from prior merge
 
-        # Compare gates 2-6
-        for gate_num in [2, 3, 4, 5, 6]:
+        # Compare only requested gates
+        for gate_num in gates_to_check:
             lg = la.legacy_gates.get(gate_num, {})
             ng = na.new_gates.get(gate_num, {})
 
@@ -491,6 +496,7 @@ def _run_borrow_and_continue(
 
                 result = ProximityResult(
                     rho=lg2["rho"],
+                    distance=lg2["d_ij"],
                     lead_id=lg2["lead_id"],
                     child_id=lg2["child_id"],
                 )
@@ -617,6 +623,7 @@ def run_gate_parity(
     *,
     quick: bool = False,
     borrow_gate: int | None = None,
+    gate_filter: list[int] | None = None,
 ) -> GateParityReport:
     """Run full gate-parity comparison on a dataset."""
     with warnings.catch_warnings():
@@ -625,7 +632,9 @@ def run_gate_parity(
         legacy_labels, legacy_attempts = _run_legacy_with_gates(X)
         new_labels, new_attempts = _run_new_with_gates(X)
 
-    divergences = _compare_attempts(legacy_attempts, new_attempts, dataset_name, quick=quick)
+    divergences = _compare_attempts(
+        legacy_attempts, new_attempts, dataset_name, quick=quick, gate_filter=gate_filter
+    )
 
     first_div = divergences[0] if divergences else None
 
@@ -749,6 +758,12 @@ def main() -> None:
     parser.add_argument("--stress-config", type=int, help="Stress test config ID to reproduce")
     parser.add_argument("--borrow", type=int, help="Gate number to borrow from legacy (2, 3, or 5)")
     parser.add_argument("--quick", action="store_true", help="Stop at first divergence")
+    parser.add_argument(
+        "--gates",
+        type=str,
+        default=None,
+        help="Comma-separated gate numbers to compare (e.g. '2,3'). Default: all gates.",
+    )
     args = parser.parse_args()
 
     print("Gate-by-Gate Parity Verification")
@@ -771,9 +786,15 @@ def main() -> None:
             if path.exists():
                 sources.append((name, _load_dataset(path)))
 
+    gate_filter = None
+    if args.gates:
+        gate_filter = [int(g.strip()) for g in args.gates.split(",")]
+
     all_pass = True
     for name, X in sources:
-        report = run_gate_parity(X, name, quick=args.quick, borrow_gate=args.borrow)
+        report = run_gate_parity(
+            X, name, quick=args.quick, borrow_gate=args.borrow, gate_filter=gate_filter
+        )
         _print_report(report)
         if report.all_divergences:
             all_pass = False

@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity cycle-profile cycle-bench cycle-verify
 
 # Default target
 help:
@@ -24,6 +24,9 @@ help:
 	@echo "  make bench-stress      Stress test (100 configs)"
 	@echo "  make bench-stress-deep Stress test (deep mode)"
 	@echo "  make gate-parity       Gate-by-gate parity verification"
+	@echo "  make cycle-profile     Profile hotspots + memory + N=70K estimate"
+	@echo "  make cycle-bench       Benchmark vs previous cycle baseline"
+	@echo "  make cycle-verify      Targeted gate parity (GATES=2,3)"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make all        Install and run all checks"
 	@echo ""
@@ -88,6 +91,15 @@ bench-stress-deep:
 
 gate-parity:
 	uv run python benchmarks/gate_parity.py
+
+cycle-profile:
+	uv run python benchmarks/cycle_bench.py profile
+
+cycle-bench:
+	uv run python benchmarks/cycle_bench.py bench
+
+cycle-verify:
+	uv run python benchmarks/cycle_bench.py verify $(if $(GATES),--gates $(GATES),)
 
 # Combined checks
 check: lint typecheck test

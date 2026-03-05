@@ -73,13 +73,9 @@ def compute_linkage(C_i: Cluster, C_j: Cluster, X: np.ndarray) -> LinkageResult:
     # --- Center distance ---
     center_dist_val = float(np.linalg.norm(C_i.center - C_j.center))
 
-    # Closest points to the center midpoint (perception.py L230-236)
-    center_mid = (C_i.center + C_j.center) / 2
-
-    dists_to_mid_i = np.linalg.norm(pts_i - center_mid, axis=1)
-    dists_to_mid_j = np.linalg.norm(pts_j - center_mid, axis=1)
-    center_ref_c1 = C_i.point_indices[int(np.argmin(dists_to_mid_i))]
-    center_ref_c2 = C_j.point_indices[int(np.argmin(dists_to_mid_j))]
+    # center_ref_c1/c2 are write-only dead values — never read downstream.
+    center_ref_c1 = -1
+    center_ref_c2 = -1
 
     # --- Mix distance (perception.py L238-243) ---
     mix_dist_val = (near_dist + center_dist_val) / 2

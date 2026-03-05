@@ -313,36 +313,77 @@ class GaugingDelta:
         lead.merge_history.extend(child.merge_history)
 
         # --- Update clusters (perception.py L277-291) ---
+
+        # Opt A: snapshot child's distances BEFORE deletion so we can apply
+        # the Lance-Williams single-linkage identity:
+        #   near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C))
+        child_near_row = self._dist_matrix[child_id, :].copy()  # O(N)
+
         del self._clusters[child_id]
         self._dist_matrix[:, child_id] = np.inf
         self._dist_matrix[child_id, :] = np.inf
 
-        # Recompute distances from lead to all active clusters
+        # Compute active AFTER deletion (excludes child_id, as current code does)
         active = np.argwhere(~np.isinf(self._dist_matrix[lead_id, :])).reshape(-1)
+
+        # Snapshot child's reference points for each active cluster
+        # (_clusters_dist entries for (child_id, c) persist after del _clusters[child_id])
+        child_refs: dict[int, tuple[int, int]] = {}
         for c in active:
             c_int = int(c)
+            ck = frozenset((child_id, c_int))
+            if ck in self._clusters_dist:
+                rp = self._clusters_dist[ck]["distance_info"]["near_dist"]["reference_points"]
+                child_refs[c_int] = (rp[child_id], rp[c_int])
+
+        # Incremental update — O(K_rem * D) vs previous O(K_rem * S^2 * D)
+        local_min = np.inf
+        for c in active:
+            c_int = int(c)
+            lead_near = self._dist_matrix[lead_id, c_int]
+            child_near = child_near_row[c_int]
+
+            # Strict < so lead wins on exact tie (matches legacy argmin first-occurrence)
+            if child_near < lead_near:
+                new_near = child_near
+                cr = child_refs.get(c_int)
+                if cr is not None:
+                    new_ref_lead, new_ref_c = cr[0], cr[1]
+                else:
+                    new_ref_lead, new_ref_c = lead_id, c_int
+            else:
+                new_near = lead_near
+                old_rp = self._clusters_dist[frozenset((lead_id, c_int))]["distance_info"][
+                    "near_dist"
+                ]["reference_points"]
+                new_ref_lead, new_ref_c = old_rp[lead_id], old_rp[c_int]
+
+            new_center = float(np.linalg.norm(lead.center - self._clusters[c_int].center))
+            new_mix = (new_near + new_center) / 2
+
             key = frozenset((lead_id, c_int))
-            lr = compute_linkage(lead, self._clusters[c_int], self._X)
             self._clusters_dist[key] = {
                 "distance_info": {
                     "near_dist": {
-                        "distance": lr.near_dist,
-                        "reference_points": {lead_id: lr.near_ref_c1, c_int: lr.near_ref_c2},
+                        "distance": new_near,
+                        "reference_points": {lead_id: new_ref_lead, c_int: new_ref_c},
                     },
                     "center_dist": {
-                        "distance": lr.center_dist,
-                        "reference_points": {lead_id: lr.center_ref_c1, c_int: lr.center_ref_c2},
+                        "distance": new_center,
+                        "reference_points": {lead_id: -1, c_int: -1},
                     },
                     "mix_dist": {
-                        "distance": lr.mix_dist,
-                        "reference_points": {lead_id: lr.mix_ref_c1, c_int: lr.mix_ref_c2},
+                        "distance": new_mix,
+                        "reference_points": {lead_id: new_ref_lead, c_int: new_ref_c},
                     },
                 }
             }
-            self._dist_matrix[lead_id, c_int] = lr.near_dist
-            self._dist_matrix[c_int, lead_id] = lr.near_dist
+            self._dist_matrix[lead_id, c_int] = new_near
+            self._dist_matrix[c_int, lead_id] = new_near
 
         # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
+        # Full scan required — non-updated pairs can have smaller distances
+        # than any newly-updated (lead, C) pair, so local_min is not sufficient.
         current_min = self._dist_matrix.min()
         if not np.isinf(current_min):
             self._fallback_dist = max(current_min, self._fallback_dist)
