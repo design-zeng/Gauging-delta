@@ -8,6 +8,7 @@ the :class:`ContinuityMetric` protocol can replace it.
 from __future__ import annotations
 
 import math
+from typing import Any
 
 import numpy as np
 
@@ -96,7 +97,7 @@ def _compute_local_transition(
     # --- Explore range loop (L755-860) ---
     explore_range = cfg.explore_radii
 
-    locality_info: list[dict] = []
+    locality_info: list[dict[str, Any]] = []
     for r in explore_range:
         locality_info.append(
             {
@@ -117,10 +118,36 @@ def _compute_local_transition(
 
     c1_points_set = set(lead.point_indices)
 
+    pd_indices, pd_dists = point_dists
+
+    # Pre-compute angles at max radius (once per merge attempt)
+    max_r = max(explore_range) * base_length
+    max_cutoff_1 = int(np.searchsorted(pd_dists[p1], max_r, side="right"))
+    max_cutoff_2 = int(np.searchsorted(pd_dists[p2], max_r, side="right"))
+
+    if max_cutoff_1 > 0:
+        cands_1 = pd_indices[p1, :max_cutoff_1]
+        all_angles_1 = compute_angle_batch(middle_point, X[cands_1], X[p1], rounding=4)
+    else:
+        cands_1 = np.empty(0, dtype=int)
+        all_angles_1 = np.empty(0)
+
+    if max_cutoff_2 > 0:
+        cands_2 = pd_indices[p2, :max_cutoff_2]
+        all_angles_2 = compute_angle_batch(middle_point, X[cands_2], X[p2], rounding=4)
+    else:
+        cands_2 = np.empty(0, dtype=int)
+        all_angles_2 = np.empty(0)
+
     for i, radius_mult in enumerate(explore_range):
         _r = radius_mult * base_length
-        _local_points1 = _find_local_points(middle_point, p1, _r, p2, X, point_dists)
-        _local_points2 = _find_local_points(middle_point, p2, _r, p1, X, point_dists)
+
+        # Slice pre-computed angles to this radius's candidates
+        cutoff_1 = int(np.searchsorted(pd_dists[p1], _r, side="right"))
+        cutoff_2 = int(np.searchsorted(pd_dists[p2], _r, side="right"))
+
+        _local_points1 = _filter_local_points(cands_1[:cutoff_1], all_angles_1[:cutoff_1], p2)
+        _local_points2 = _filter_local_points(cands_2[:cutoff_2], all_angles_2[:cutoff_2], p1)
 
         locality_info[i]["red"]["local_points"] = _local_points1
         locality_info[i]["green"]["local_points"] = _local_points2
@@ -174,12 +201,10 @@ def _compute_local_transition(
             transition_smoothness = _compute_transition_smoothness(
                 p1,
                 p2,
-                middle_point,
                 N1,
                 N2,
                 _r,
                 radius_mult - 1,
-                X,
                 point_dists,
                 cfg,
             )
@@ -234,35 +259,20 @@ def _compute_local_transition(
 # ---------------------------------------------------------------------------
 
 
-def _find_local_points(
-    middle_point: np.ndarray,
-    point: int,
-    radius: float,
+def _filter_local_points(
+    cand_indices: np.ndarray,
+    angles: np.ndarray,
     exclude_point: int,
-    X: np.ndarray,
-    point_dists: tuple[np.ndarray, np.ndarray],
     *,
     find_all: bool = False,
 ) -> np.ndarray:
-    """Port of ``find_local_points`` (perception.py L1410-1427).
+    """Apply angle filter and sort to pre-computed candidates and angles.
 
     Returns (n, 2) array: columns are [point_index, angle].
-    ``point_dists`` is ``(pd_indices, pd_dists)`` — sorted neighbor arrays.
     """
-    pd_indices, pd_dists = point_dists
-
-    # Collect candidates within radius (pd_dists[point] is pre-sorted)
-    dists_row = pd_dists[point]
-    cutoff = int(np.searchsorted(dists_row, radius, side="right"))
-    if cutoff == 0:
+    if len(cand_indices) == 0:
         return np.empty((0, 2))
 
-    cand_indices = pd_indices[point, :cutoff]
-
-    # Batch angle computation (angle is symmetric in left/right)
-    angles = compute_angle_batch(middle_point, X[cand_indices], X[point], rounding=4)
-
-    # Vectorized filter by angle criteria
     half_pi = math.pi / 2
     if not find_all:
         three_half_pi = 3 * math.pi / 2
@@ -271,20 +281,16 @@ def _find_local_points(
             return np.empty((0, 2))
         filt_idx = cand_indices[mask]
         filt_ang = angles[mask].copy()
-        # Adjust angles > 3π/2 → subtract 2π
         wrap = filt_ang >= three_half_pi
         filt_ang[wrap] -= 2 * math.pi
     else:
         filt_idx = cand_indices
         filt_ang = angles.copy()
-        # Adjust angles > π → subtract 2π
         wrap = filt_ang > math.pi
         filt_ang[wrap] -= 2 * math.pi
 
-    # Sort by adjusted angle
     order = np.argsort(filt_ang, kind="stable")
-    result = np.column_stack((filt_idx[order].astype(float), filt_ang[order]))
-    return result
+    return np.column_stack((filt_idx[order].astype(float), filt_ang[order]))
 
 
 def _remove_outliers(
@@ -423,19 +429,15 @@ def _find_smallest_angle_pair(
 def _compute_transition_smoothness(
     p1: int,
     p2: int,
-    middle_point: np.ndarray,
     N1: int,
     N2: int,
     radius: float,
     r_rate: float,
-    X: np.ndarray,
     point_dists: tuple[np.ndarray, np.ndarray],
     cfg: GaugingDeltaConfig,
 ) -> float:
     """Port of ``compute_transition_smoothness`` (perception.py L1176-1188)."""
-    r_e, r_i, g_i, g_e = _compute_transition_state(
-        p1, p2, middle_point, N1, N2, radius, X, point_dists
-    )
+    r_e, r_i, g_i, g_e = _compute_transition_state(p1, p2, N1, N2, radius, point_dists)
     if r_e == 0 or g_e == 0:
         return max(cfg.transition_external_zero_fallback, (max(N1, N2) / min(N1, N2)) / r_rate) if r_rate != 0 else cfg.transition_external_zero_fallback
     elif ((r_i < g_i or r_i < g_e) and r_i < r_e) or (g_i < g_e and (g_i < r_i or g_i < r_e)):
@@ -452,27 +454,24 @@ def _compute_transition_smoothness(
 def _compute_transition_state(
     p1: int,
     p2: int,
-    middle_point: np.ndarray,
     N1: int,
     N2: int,
     radius: float,
-    X: np.ndarray,
     point_dists: tuple[np.ndarray, np.ndarray],
 ) -> tuple[float, float, float, float]:
     """Port of ``compute_transition_state`` (perception.py L1363-1370).
 
-    Returns (r_e, r_i, g_i, g_e) — external/internal counts per side.
+    Returns (r_e, r_i, g_i, g_e) -- external/internal counts per side.
+
+    Since find_all=True keeps ALL candidates (no angle filter), the count
+    equals the number of neighbors within radius, obtainable via searchsorted.
     """
-    all_local_points1 = _find_local_points(
-        middle_point, p1, radius, p2, X, point_dists, find_all=True
-    )
-    all_local_points2 = _find_local_points(
-        middle_point, p2, radius, p1, X, point_dists, find_all=True
-    )
+    _, pd_dists = point_dists
+    count_1 = int(np.searchsorted(pd_dists[p1], radius, side="right"))
+    count_2 = int(np.searchsorted(pd_dists[p2], radius, side="right"))
 
-    g_i = len(all_local_points1) + 1 - N1
-    r_i = len(all_local_points2) + 1 - N2
-
+    g_i = count_1 + 1 - N1
+    r_i = count_2 + 1 - N2
     r_e = N1 - r_i
     g_e = N2 - g_i
     return float(r_e), float(r_i), float(g_i), float(g_e)

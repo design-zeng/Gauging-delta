@@ -75,15 +75,15 @@ def _make_blobs(n: int, dim: int = 2, seed: int = 42) -> np.ndarray:
 
 # Default synthetic configurations: (label, N, D)
 SYNTH_SCALING = [
-    ("s100", 100, 2),
     ("s250", 250, 2),
     ("s500", 500, 2),
-    ("s750", 750, 2),
     ("s1000", 1000, 2),
+    ("s2000", 2000, 2),
+    ("s3000", 3000, 2),
 ]
 SYNTH_DIMENSIONAL = [
-    ("d10", 500, 10),
-    ("d50", 500, 50),
+    ("d10", 1000, 10),
+    ("d50", 1000, 50),
 ]
 DEFAULT_SEEDS = [42, 123, 777]
 
