@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity cycle-profile cycle-bench cycle-verify
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity cycle-profile cycle-bench cycle-verify cycle-memray
 
 # Default target
 help:
@@ -27,6 +27,7 @@ help:
 	@echo "  make cycle-profile     Profile hotspots + memory + N=70K estimate"
 	@echo "  make cycle-bench       Benchmark vs previous cycle baseline"
 	@echo "  make cycle-verify      Targeted gate parity (GATES=2,3)"
+	@echo "  make cycle-memray      Memory flamegraph via memray (MEMRAY_N=2000)"
 	@echo "  make clean      Remove build artifacts"
 	@echo "  make all        Install and run all checks"
 	@echo ""
@@ -100,6 +101,17 @@ cycle-bench:
 
 cycle-verify:
 	uv run python benchmarks/cycle_bench.py verify $(if $(GATES),--gates $(GATES),)
+
+MEMRAY_N ?= 2000
+cycle-memray:
+	mkdir -p benchmarks/results
+	uv run memray run --aggregate -o benchmarks/results/memray.bin \
+		benchmarks/cycle_bench.py profile --profile-n $(MEMRAY_N) --sizes $(MEMRAY_N)
+	uv run memray flamegraph benchmarks/results/memray.bin \
+		-o benchmarks/results/memray_flamegraph.html
+	uv run memray summary benchmarks/results/memray.bin
+	@echo ""
+	@echo "Flamegraph: benchmarks/results/memray_flamegraph.html"
 
 # Combined checks
 check: lint typecheck test

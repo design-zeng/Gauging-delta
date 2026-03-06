@@ -80,6 +80,7 @@ SYNTH_SCALING = [
     ("s1000", 1000, 2),
     ("s2000", 2000, 2),
     ("s3000", 3000, 2),
+    ("s5000", 5000, 2),
 ]
 SYNTH_DIMENSIONAL = [
     ("d10", 1000, 10),
@@ -486,11 +487,11 @@ def main() -> None:
     p_prof = sub.add_parser("profile", help="Profile hotspots and memory")
     p_prof.add_argument("--dataset", type=str, default=None, help="Dataset to profile (default: synthetic)")
     p_prof.add_argument(
-        "--profile-n", type=int, default=2000,
-        help="Synthetic blob size for cProfile (default: 2000). Ignored when --dataset is set.",
+        "--profile-n", type=int, default=5000,
+        help="Synthetic blob size for cProfile (default: 5000). Ignored when --dataset is set.",
     )
     p_prof.add_argument(
-        "--sizes", nargs="+", type=int, default=[500, 1000, 2000, 3000],
+        "--sizes", nargs="+", type=int, default=[500, 1000, 2000, 3000, 5000],
         help="Synthetic sizes for scaling measurement",
     )
 

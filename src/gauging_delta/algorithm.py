@@ -167,10 +167,9 @@ class GaugingDelta:
         self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
 
         # MIN_BTN_CLUSTER_DIST (perception.py L213)
-        # Track matrix minimum incrementally: position + value
-        self._cached_dist_min = float(self._dist_matrix.min())
-        flat_idx = int(np.argmin(self._dist_matrix))
-        self._min_pos = (flat_idx // n, flat_idx % n)
+        # Row-wise minimum tracking: per-row argmin column + value arrays
+        self._row_argmins = np.argmin(self._dist_matrix, axis=1).astype(int)
+        self._row_mins = self._dist_matrix[np.arange(n), self._row_argmins].copy()
         upper = pairwise[np.triu_indices(n, k=1)]
         upper.sort()
         self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
@@ -193,12 +192,10 @@ class GaugingDelta:
         return ind[:, order]
 
     def _get_nearest_cluster(self, cid: int) -> int | None:
-        """Nearest active cluster to *cid* (perception.py L105)."""
-        row = self._dist_matrix[cid, :]
-        nearest = int(np.argmin(row))
-        if np.isinf(row[nearest]):
+        """Nearest active cluster to *cid* (perception.py L105). O(1) lookup."""
+        if np.isinf(self._row_mins[cid]):
             return None
-        return nearest
+        return int(self._row_argmins[cid])
 
     # ----- Mergeability pipeline -------------------------------------------
 
@@ -318,26 +315,43 @@ class GaugingDelta:
         self._near_ref[winning, lead_id] = child_ref_other[winning]
 
         # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
-        # Incremental: track position of matrix minimum.  Only the lead row
-        # changed (Lance-Williams: values decrease or stay) and child row → inf.
-        min_i, min_j = self._min_pos
-        if min_i == child_id or min_j == child_id:
-            # Cached position gone (child merged away).  Full scan needed
-            # because the global min could be anywhere in the unchanged matrix.
-            flat_idx = int(np.argmin(self._dist_matrix))
-            n = self._dist_matrix.shape[0]
-            self._cached_dist_min = float(self._dist_matrix.ravel()[flat_idx])
-            if not np.isinf(self._cached_dist_min):
-                self._min_pos = (flat_idx // n, flat_idx % n)
-        else:
-            # Cached position still valid.  Lead row may have decreased.
-            lead_argmin = int(np.argmin(self._dist_matrix[lead_id, :]))
-            lead_row_min = float(self._dist_matrix[lead_id, lead_argmin])
-            if lead_row_min < self._cached_dist_min:
-                self._cached_dist_min = lead_row_min
-                self._min_pos = (lead_id, lead_argmin)
-        if not np.isinf(self._cached_dist_min):
-            self._fallback_dist = max(self._cached_dist_min, self._fallback_dist)
+        # Row-wise minimum tracking: maintain per-row min value + position.
+        # Only rescan rows that actually changed instead of full O(N²) scan.
+
+        # 1. Identify stale rows (argmin pointed to the now-dead child)
+        stale_mask = self._row_argmins == child_id
+
+        # 2. Invalidate child row
+        self._row_mins[child_id] = np.inf
+
+        # 3. Rescan lead row (always needed: lead distances changed)
+        lead_min_col = int(np.argmin(self._dist_matrix[lead_id, :]))
+        self._row_argmins[lead_id] = lead_min_col
+        self._row_mins[lead_id] = self._dist_matrix[lead_id, lead_min_col]
+
+        # 4. Non-stale winning rows: lead column decreased, might be new row min
+        if len(winning) > 0:
+            non_stale_winning = winning[~stale_mask[winning]]
+            if len(non_stale_winning) > 0:
+                new_dists = self._dist_matrix[non_stale_winning, lead_id]
+                improved = new_dists < self._row_mins[non_stale_winning]
+                update_idx = non_stale_winning[improved]
+                self._row_mins[update_idx] = new_dists[improved]
+                self._row_argmins[update_idx] = lead_id
+
+        # 5. Stale rows: full row rescan (expected ~1-5 rows)
+        stale_mask[child_id] = False
+        stale_mask[lead_id] = False
+        stale_rows = np.where(stale_mask)[0]
+        for c in stale_rows:
+            c_min_col = int(np.argmin(self._dist_matrix[c, :]))
+            self._row_argmins[c] = c_min_col
+            self._row_mins[c] = self._dist_matrix[c, c_min_col]
+
+        # 6. Global min → update fallback_dist
+        current_min = float(np.min(self._row_mins))
+        if not np.isinf(current_min):
+            self._fallback_dist = max(current_min, self._fallback_dist)
 
     # ----- Post-processing -------------------------------------------------
 

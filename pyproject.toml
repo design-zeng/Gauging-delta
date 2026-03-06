@@ -39,6 +39,7 @@ dev = [
 bench = [
     "psutil>=5.9.0",
     "scienceplots>=2.1.0",
+    "memray>=1.0.0",
 ]
 all = [
     "gauging-delta[dev,bench]",
