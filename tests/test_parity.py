@@ -153,12 +153,12 @@ def test_merge_sequence_parity(
     _orig_tm = GaugingDelta._try_merge
 
     def _log_tm(self, c1, c2):
+        d = float(self._dist_matrix[c1, c2])  # capture before merge invalidates child row
         result = _orig_tm(self, c1, c2)
         if result is not None:
             lead_id = result
             child_id = c2 if lead_id == c1 else c1
-            d = self._clusters_dist[frozenset((c1, c2))]["distance_info"]["near_dist"]["distance"]
-            new_merges.append((lead_id, child_id, float(d)))
+            new_merges.append((lead_id, child_id, d))
         return result
 
     GaugingDelta._try_merge = _log_tm

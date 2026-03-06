@@ -12,7 +12,7 @@ from gauging_delta._types import ContinuityMetric, LinkageMetric, ProximityMetri
 from gauging_delta.cluster import Cluster
 from gauging_delta.config import GaugingDeltaConfig
 from gauging_delta.continuity import DefaultContinuity
-from gauging_delta.linkage import DefaultLinkage, compute_linkage
+from gauging_delta.linkage import DefaultLinkage
 from gauging_delta.proximity import DefaultProximity
 from gauging_delta.threshold import compute_adaptive_threshold
 
@@ -159,24 +159,8 @@ class GaugingDelta:
                 cj = keys[idx_j]
                 d = float(pairwise[idx_i, idx_j])
 
-                # For singletons: near_dist = center_dist = mix_dist = d
-                # near_ref points are the points themselves; center_ref = -1 (dead)
-                self._clusters_dist[frozenset((ci, cj))] = {
-                    "distance_info": {
-                        "near_dist": {
-                            "distance": d,
-                            "reference_points": {ci: ci, cj: cj},
-                        },
-                        "center_dist": {
-                            "distance": d,
-                            "reference_points": {ci: -1, cj: -1},
-                        },
-                        "mix_dist": {
-                            "distance": d,
-                            "reference_points": {ci: ci, cj: cj},
-                        },
-                    }
-                }
+                # For singletons, near_dist ref points are the points themselves
+                self._clusters_dist[frozenset((ci, cj))] = {ci: ci, cj: cj}
 
                 pd_list.append([cj, d])
                 self._point_dists.setdefault(cj, []).append([ci, d])
@@ -231,9 +215,7 @@ class GaugingDelta:
         """
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
-        d_ij: float = self._clusters_dist[frozenset((c1, c2))]["distance_info"]["near_dist"][
-            "distance"
-        ]
+        d_ij: float = float(self._dist_matrix[c1, c2])
 
         # Step 1: Proximity (perception.py L310)
         prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
@@ -250,7 +232,6 @@ class GaugingDelta:
             rho,
             self._clusters,
             self._dist_matrix,
-            self._clusters_dist,
             self.config,
         )
 
@@ -261,12 +242,8 @@ class GaugingDelta:
         # Step 3: Continuity (perception.py L323-325)
         # Set reference points for continuity
         pair_key = frozenset((lead_id, child_id))
-        lead.ref_point = self._clusters_dist[pair_key]["distance_info"]["near_dist"][
-            "reference_points"
-        ][lead_id]
-        child.ref_point = self._clusters_dist[pair_key]["distance_info"]["near_dist"][
-            "reference_points"
-        ][child_id]
+        lead.ref_point = self._clusters_dist[pair_key][lead_id]
+        child.ref_point = self._clusters_dist[pair_key][child_id]
 
         cont_threshold = self.config.threshold_continuity / thr.xi_s
         d_ij_norm = d_ij / rho if rho != 0 else d_ij
@@ -305,12 +282,8 @@ class GaugingDelta:
         pair_key = frozenset((lead_id, child_id))
 
         # --- Merge data (perception.py L298-306) ---
-        p1 = self._clusters_dist[pair_key]["distance_info"]["near_dist"]["reference_points"][
-            lead_id
-        ]
-        p2 = self._clusters_dist[pair_key]["distance_info"]["near_dist"]["reference_points"][
-            child_id
-        ]
+        p1 = self._clusters_dist[pair_key][lead_id]
+        p2 = self._clusters_dist[pair_key][child_id]
         lead.merge_edges.append((p1, p2))
         lead.merge_edges.extend(child.merge_edges)
 
@@ -327,33 +300,31 @@ class GaugingDelta:
 
         # --- Update clusters (perception.py L277-291) ---
 
-        # Opt A: snapshot child's distances BEFORE deletion so we can apply
-        # the Lance-Williams single-linkage identity:
-        #   near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C))
-        child_near_row = self._dist_matrix[child_id, :].copy()  # O(N)
+        # Snapshot child's distances BEFORE deletion (Lance-Williams identity:
+        # near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C)))
+        child_near_row = self._dist_matrix[child_id, :].copy()
 
         del self._clusters[child_id]
         self._dist_matrix[:, child_id] = np.inf
         self._dist_matrix[child_id, :] = np.inf
 
-        # Compute active AFTER deletion (excludes child_id, as current code does)
         active = np.argwhere(~np.isinf(self._dist_matrix[lead_id, :])).reshape(-1)
 
         # Snapshot child's reference points for each active cluster
-        # (_clusters_dist entries for (child_id, c) persist after del _clusters[child_id])
         child_refs: dict[int, tuple[int, int]] = {}
         for c in active:
             c_int = int(c)
             ck = frozenset((child_id, c_int))
             if ck in self._clusters_dist:
-                rp = self._clusters_dist[ck]["distance_info"]["near_dist"]["reference_points"]
+                rp = self._clusters_dist[ck]
                 child_refs[c_int] = (rp[child_id], rp[c_int])
 
-        # Incremental update — O(K_rem * D) vs previous O(K_rem * S^2 * D)
-        local_min = np.inf
+        # Incremental update with Lance-Williams identity
+        clusters_dist = self._clusters_dist
+        dist_matrix = self._dist_matrix
         for c in active:
             c_int = int(c)
-            lead_near = self._dist_matrix[lead_id, c_int]
+            lead_near = dist_matrix[lead_id, c_int]
             child_near = child_near_row[c_int]
 
             # Strict < so lead wins on exact tie (matches legacy argmin first-occurrence)
@@ -366,37 +337,15 @@ class GaugingDelta:
                     new_ref_lead, new_ref_c = lead_id, c_int
             else:
                 new_near = lead_near
-                old_rp = self._clusters_dist[frozenset((lead_id, c_int))]["distance_info"][
-                    "near_dist"
-                ]["reference_points"]
+                old_rp = clusters_dist[frozenset((lead_id, c_int))]
                 new_ref_lead, new_ref_c = old_rp[lead_id], old_rp[c_int]
 
-            new_center = float(np.linalg.norm(lead.center - self._clusters[c_int].center))
-            new_mix = (new_near + new_center) / 2
-
             key = frozenset((lead_id, c_int))
-            self._clusters_dist[key] = {
-                "distance_info": {
-                    "near_dist": {
-                        "distance": new_near,
-                        "reference_points": {lead_id: new_ref_lead, c_int: new_ref_c},
-                    },
-                    "center_dist": {
-                        "distance": new_center,
-                        "reference_points": {lead_id: -1, c_int: -1},
-                    },
-                    "mix_dist": {
-                        "distance": new_mix,
-                        "reference_points": {lead_id: new_ref_lead, c_int: new_ref_c},
-                    },
-                }
-            }
-            self._dist_matrix[lead_id, c_int] = new_near
-            self._dist_matrix[c_int, lead_id] = new_near
+            clusters_dist[key] = {lead_id: new_ref_lead, c_int: new_ref_c}
+            dist_matrix[lead_id, c_int] = new_near
+            dist_matrix[c_int, lead_id] = new_near
 
         # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
-        # Full scan required — non-updated pairs can have smaller distances
-        # than any newly-updated (lead, C) pair, so local_min is not sufficient.
         current_min = self._dist_matrix.min()
         if not np.isinf(current_min):
             self._fallback_dist = max(current_min, self._fallback_dist)
@@ -429,12 +378,8 @@ class GaugingDelta:
         pair_key = frozenset((lead_id, child_id))
 
         if pair_key in self._clusters_dist:
-            p1 = self._clusters_dist[pair_key]["distance_info"]["near_dist"]["reference_points"][
-                lead_id
-            ]
-            p2 = self._clusters_dist[pair_key]["distance_info"]["near_dist"]["reference_points"][
-                child_id
-            ]
+            p1 = self._clusters_dist[pair_key][lead_id]
+            p2 = self._clusters_dist[pair_key][child_id]
             lead.merge_edges.append((p1, p2))
         lead.merge_edges.extend(child.merge_edges)
 

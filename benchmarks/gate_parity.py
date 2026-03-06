@@ -272,8 +272,8 @@ def _run_new_with_gates(X: np.ndarray) -> tuple[np.ndarray, list[AttemptRecord]]
         cap_prox.append(result)
         return result
 
-    def _patched_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, clusters_dist, cfg):
-        result = _orig_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, clusters_dist, cfg)
+    def _patched_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, cfg):
+        result = _orig_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, cfg)
         cap_thresh.clear()
         cap_thresh.append(result)
         return result
@@ -285,9 +285,7 @@ def _run_new_with_gates(X: np.ndarray) -> tuple[np.ndarray, list[AttemptRecord]]
         return result
 
     def _patched_tm(self, c1, c2):
-        d_ij = float(
-            self._clusters_dist[frozenset((c1, c2))]["distance_info"]["near_dist"]["distance"]
-        )
+        d_ij = float(self._dist_matrix[c1, c2])
 
         result = _orig_tm(self, c1, c2)
 
@@ -503,8 +501,8 @@ def _run_borrow_and_continue(
                 cap_prox[-1] = result
         return result
 
-    def _patched_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, clusters_dist, cfg):
-        result = _orig_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, clusters_dist, cfg)
+    def _patched_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, cfg):
+        result = _orig_thresh(lead, child, d_ij, rho, all_clusters, dist_matrix, cfg)
         cap_thresh.clear()
         cap_thresh.append(result)
 
@@ -539,9 +537,7 @@ def _run_borrow_and_continue(
         return result
 
     def _patched_tm(self, c1, c2):
-        d_ij = float(
-            self._clusters_dist[frozenset((c1, c2))]["distance_info"]["near_dist"]["distance"]
-        )
+        d_ij = float(self._dist_matrix[c1, c2])
         result = _orig_tm(self, c1, c2)
 
         # Capture and compare downstream gates for this attempt

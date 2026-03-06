@@ -29,7 +29,6 @@ def compute_adaptive_threshold(
     rho: float,
     all_clusters: dict[int, Cluster],
     dist_matrix: np.ndarray,
-    clusters_dist: dict,
     cfg: GaugingDeltaConfig,
 ) -> ThresholdResult:
     """Compute adaptive thresholds T_i, T_j, shape similarity xi_s.
@@ -56,7 +55,7 @@ def compute_adaptive_threshold(
 
     # --- Step 2: vision scale / beta (perception.py L362-400) ---
     vision_scale = _compute_vision_scale(
-        c1_id, c2_id, d_ij, idx1, idx2, all_clusters, clusters_dist, cfg
+        c1_id, c2_id, d_ij, idx1, idx2, all_clusters, dist_matrix, cfg
     )
 
     # --- Step 3: T_stat per cluster (perception.py L402-417) ---
@@ -91,12 +90,12 @@ def _compute_vision_scale(
     idx1: np.ndarray,
     idx2: np.ndarray,
     all_clusters: dict[int, Cluster],
-    clusters_dist: dict,
+    dist_matrix: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> float:
     """Force-weighted environmental scaling (perception.py L362-400)."""
     # base force between the two clusters
-    base_force = _compute_force(c1_id, c2_id, all_clusters, clusters_dist)
+    base_force = _compute_force(c1_id, c2_id, all_clusters, dist_matrix)
     if base_force == 0:
         return 1.0
 
@@ -106,8 +105,8 @@ def _compute_vision_scale(
     for c in idx1:
         c_int = int(c)
         if c_int in set2:
-            f1 = _compute_force(c_int, c1_id, all_clusters, clusters_dist)
-            f2 = _compute_force(c_int, c2_id, all_clusters, clusters_dist)
+            f1 = _compute_force(c_int, c1_id, all_clusters, dist_matrix)
+            f2 = _compute_force(c_int, c2_id, all_clusters, dist_matrix)
             forces.append((math.sqrt(f1 * f2) / base_force, c_int))
 
     if not forces:
@@ -119,8 +118,8 @@ def _compute_vision_scale(
     cont_clusters: list[tuple[float, float]] = []
     total_affect = 0.0
     for weight, cid in forces:
-        d_c1 = _near_dist(cid, c1_id, clusters_dist)
-        d_c2 = _near_dist(cid, c2_id, clusters_dist) if cid != c2_id else d_c1
+        d_c1 = float(dist_matrix[cid, c1_id])
+        d_c2 = float(dist_matrix[cid, c2_id]) if cid != c2_id else d_c1
         cont_clusters.append((weight, (d_c2 + d_c1) / 2))
         total_affect += weight
         if len(cont_clusters) == cfg.n_contextual_clusters:
@@ -142,22 +141,17 @@ def _compute_force(
     c1_id: int,
     c2_id: int,
     all_clusters: dict[int, Cluster],
-    clusters_dist: dict,
+    dist_matrix: np.ndarray,
 ) -> float:
     """Gravitational force = m1*m2 / d^2 (perception.py L344-348)."""
-    key = frozenset((c1_id, c2_id))
-    if key not in clusters_dist:
+    near_d = dist_matrix[c1_id, c2_id]
+    if np.isinf(near_d):
         return 0.0
-    d = clusters_dist[key]["distance_info"]["mix_dist"]["distance"]
+    center_d = float(np.linalg.norm(all_clusters[c1_id].center - all_clusters[c2_id].center))
+    d = (float(near_d) + center_d) / 2
     m1 = len(all_clusters[c1_id])
     m2 = len(all_clusters[c2_id])
     return float(np.float64(m1 * m2) / np.float64(d) ** 2)
-
-
-def _near_dist(c1_id: int, c2_id: int, clusters_dist: dict) -> float:
-    """Near distance between two clusters from clusters_dist cache."""
-    key = frozenset((c1_id, c2_id))
-    return float(clusters_dist[key]["distance_info"]["near_dist"]["distance"])
 
 
 def _compute_t_stat(cluster: Cluster, cfg: GaugingDeltaConfig) -> float:
