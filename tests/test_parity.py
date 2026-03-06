@@ -84,7 +84,7 @@ def test_seed_parity(seed: int) -> None:
     X, y = X[perm], y[perm]
 
     # Legacy
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "legacy"))
     from perception import Perception
 
     old_stdout = sys.stdout
@@ -123,7 +123,7 @@ def test_merge_sequence_parity(
     X, _ = datasets[name]
 
     # --- Legacy merge log ---
-    sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+    sys.path.insert(0, str(Path(__file__).resolve().parent / "legacy"))
     from perception import Perception
 
     legacy_merges: list[tuple[int, int, float]] = []

@@ -1,0 +1,22 @@
+# assets/
+
+Static image assets used in the project README and documentation.
+
+---
+
+## Files
+
+| File | Used in | Description |
+|---|---|---|
+| `readme_plot.png` | `README.md` hero section | Side-by-side: raw input (top row) vs Gauging-delta output (bottom row) on jain, flame, and 3-spiral. Illustrates the algorithm's ability to recover non-convex cluster structure without parameters. |
+| `scaling_benchmark.png` | `README.md` scaling section | Log-log runtime and memory plots comparing full mode O(N^1.5) and lite mode O(N^1.1) across dataset sizes from 100 to 100 000 points. Includes the 64 GB RAM ceiling for reference. |
+| `mode_comparison.png` | Reference only (not in README) | Three-column grid (Ground Truth / Full Mode / Lite Mode) on jain, compound, and 3-spiral. Shows the quality trade-off between modes. |
+
+---
+
+## Regenerating Plots
+
+These images were generated with ephemeral scripts using `scienceplots` styling.
+To regenerate, create a plotting script that runs `GaugingDelta` on the relevant
+datasets and saves the figure here. See `benchmarks/README.md` for the benchmark
+tooling that can produce similar outputs.

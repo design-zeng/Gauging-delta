@@ -13,8 +13,8 @@ import numpy as np
 import pytest
 
 
-# Ensure the repo root (containing perception.py) is importable
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+# Ensure the legacy directory (containing perception.py) is importable
+sys.path.insert(0, str(Path(__file__).resolve().parent / "legacy"))
 
 DATA_DIR = Path(__file__).resolve().parent.parent / "data"
 
