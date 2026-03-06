@@ -62,15 +62,41 @@ def _load_dataset(path: Path) -> np.ndarray:
     return np.loadtxt(str(path), delimiter=",")[:, :2]
 
 
-def _make_blobs(n: int, seed: int = 42) -> np.ndarray:
+def _make_blobs(n: int, dim: int = 2, seed: int = 42) -> np.ndarray:
     rng = np.random.default_rng(seed)
-    centers = rng.uniform(-20, 20, size=(5, 2))
+    centers = rng.uniform(-20, 20, size=(5, dim))
     parts = []
     per = n // 5
     for i, c in enumerate(centers):
         count = per + (1 if i < n - per * 5 else 0)
-        parts.append(rng.normal(loc=c, scale=1.0, size=(count, 2)))
+        parts.append(rng.normal(loc=c, scale=1.0, size=(count, dim)))
     return np.vstack(parts)
+
+
+# Default synthetic configurations: (label, N, D)
+SYNTH_SCALING = [
+    ("s100", 100, 2),
+    ("s250", 250, 2),
+    ("s500", 500, 2),
+    ("s750", 750, 2),
+    ("s1000", 1000, 2),
+]
+SYNTH_DIMENSIONAL = [
+    ("d10", 500, 10),
+    ("d50", 500, 50),
+]
+DEFAULT_SEEDS = [42, 123, 777]
+
+
+def _print_time_estimate(label: str, seconds: float) -> None:
+    if seconds < 60:
+        print(f"{label}: {seconds:.1f} seconds")
+    elif seconds < 3600:
+        print(f"{label}: {seconds / 60:.1f} minutes")
+    elif seconds < 86400:
+        print(f"{label}: {seconds / 3600:.1f} hours")
+    else:
+        print(f"{label}: {seconds / 86400:.1f} days")
 
 
 # ---------------------------------------------------------------------------
@@ -204,13 +230,13 @@ def cmd_profile(args: argparse.Namespace) -> None:
     for stat in top_stats[:10]:
         print(f"    {stat}")
 
-    # --- 4. Scaling measurement + extrapolation ---
-    print(f"\nScaling measurement (sizes={sizes}):")
+    # --- 4. Quick scaling check (single seed, for complexity estimate) ---
+    print(f"\nScaling check (single seed, sizes={sizes}):")
     print("-" * 60)
     timing_data: list[tuple[int, float, float]] = []
 
     for n in sizes:
-        X_synth = _make_blobs(n)
+        X_synth = _make_blobs(n, seed=42)
         _, elapsed, mem = _run_timed(X_synth)
         timing_data.append((n, elapsed, mem))
         print(f"  N={n:>6d}  time={elapsed:>8.3f}s  mem={mem / 1e6:>8.1f} MB")
@@ -222,14 +248,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
 
         print(f"\n  Best-fit complexity: {best_model} (R^2={r2:.4f})")
         if ext_70k > 0:
-            if ext_70k < 60:
-                print(f"  N=70K extrapolation: {ext_70k:.1f} seconds")
-            elif ext_70k < 3600:
-                print(f"  N=70K extrapolation: {ext_70k / 60:.1f} minutes")
-            elif ext_70k < 86400:
-                print(f"  N=70K extrapolation: {ext_70k / 3600:.1f} hours")
-            else:
-                print(f"  N=70K extrapolation: {ext_70k / 86400:.1f} days")
+            _print_time_estimate("  N=70K extrapolation", ext_70k)
 
     # --- 5. Save profile results ---
     RESULTS_DIR.mkdir(parents=True, exist_ok=True)
@@ -257,12 +276,32 @@ def cmd_profile(args: argparse.Namespace) -> None:
 # bench subcommand
 # ---------------------------------------------------------------------------
 
+def _run_multi_seed(
+    n: int, dim: int, seeds: list[int],
+) -> tuple[float, float, float, float]:
+    """Run multiple seeds, return (median_time, std_time, median_mem, std_mem)."""
+    times, mems = [], []
+    for seed in seeds:
+        X = _make_blobs(n, dim=dim, seed=seed)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", RuntimeWarning)
+            _, elapsed, mem = _run_timed(X)
+        times.append(elapsed)
+        mems.append(mem)
+    return (
+        float(np.median(times)),
+        float(np.std(times)),
+        float(np.median(mems)),
+        float(np.std(mems)),
+    )
+
+
 def cmd_bench(args: argparse.Namespace) -> None:
     """Benchmark against previous cycle's baseline."""
-    sizes = args.sizes
+    seeds = args.seeds
 
     print("=" * 60)
-    print("Cycle Benchmark")
+    print(f"Cycle Benchmark (seeds={seeds})")
     print("=" * 60)
 
     # Load baseline if exists
@@ -277,12 +316,12 @@ def cmd_bench(args: argparse.Namespace) -> None:
 
     results: dict[str, dict] = {"datasets": {}, "synthetic": {}}
 
-    # --- Benchmark datasets ---
-    print(f"\n{'Dataset':<15s} {'N':>5s} {'Time (s)':>10s} {'Mem (MB)':>10s}", end="")
+    # --- Fixed benchmark datasets (single run, deterministic) ---
+    print(f"\n{'Dataset':<15s} {'N':>5s} {'D':>3s} {'Time (s)':>10s} {'Mem (MB)':>10s}", end="")
     if baseline:
         print(f" {'Prev (s)':>10s} {'Speedup':>10s}", end="")
     print()
-    print("-" * (55 + (22 if baseline else 0)))
+    print("-" * (48 + (22 if baseline else 0)))
 
     for name, path in BENCHMARK_DATASETS.items():
         if not path.exists():
@@ -296,50 +335,64 @@ def cmd_bench(args: argparse.Namespace) -> None:
             "n": len(X), "time_s": elapsed, "peak_bytes": mem,
         }
 
-        line = f"{name:<15s} {len(X):>5d} {elapsed:>10.3f} {mem / 1e6:>10.1f}"
+        line = f"{name:<15s} {len(X):>5d} {X.shape[1]:>3d} {elapsed:>10.3f} {mem / 1e6:>10.1f}"
         if baseline and name in baseline.get("datasets", {}):
             prev = baseline["datasets"][name]["time_s"]
             speedup = prev / elapsed if elapsed > 0 else float("inf")
             line += f" {prev:>10.3f} {speedup:>9.2f}x"
         print(line)
 
-    # --- Synthetic sizes ---
-    if sizes:
-        print()
-        for n in sizes:
-            X = _make_blobs(n)
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", RuntimeWarning)
-                _, elapsed, mem = _run_timed(X)
+    # --- Synthetic configs: scaling + dimensional, multi-seed ---
+    synth_configs = SYNTH_SCALING + SYNTH_DIMENSIONAL
+    print(f"\n{'Config':<15s} {'N':>5s} {'D':>3s} {'Time (s)':>10s} {'± Std':>8s} "
+          f"{'Mem (MB)':>10s}", end="")
+    if baseline:
+        print(f" {'Prev (s)':>10s} {'Speedup':>10s}", end="")
+    print()
+    print("-" * (55 + (22 if baseline else 0)))
 
-            key = str(n)
-            results["synthetic"][key] = {
-                "n": n, "time_s": elapsed, "peak_bytes": mem,
-            }
+    for label, n, dim in synth_configs:
+        med_t, std_t, med_m, std_m = _run_multi_seed(n, dim, seeds)
 
-            line = f"{'synth_' + key:<15s} {n:>5d} {elapsed:>10.3f} {mem / 1e6:>10.1f}"
-            if baseline and key in baseline.get("synthetic", {}):
-                prev = baseline["synthetic"][key]["time_s"]
-                speedup = prev / elapsed if elapsed > 0 else float("inf")
-                line += f" {prev:>10.3f} {speedup:>9.2f}x"
-            print(line)
+        results["synthetic"][label] = {
+            "n": n, "dim": dim, "seeds": seeds,
+            "time_s": med_t, "time_std": std_t,
+            "peak_bytes": med_m, "mem_std": std_m,
+        }
 
-    # --- Extrapolation ---
-    all_timings = [(r["n"], r["time_s"]) for r in results["datasets"].values()]
-    all_timings += [(r["n"], r["time_s"]) for r in results["synthetic"].values()]
-    if len(all_timings) >= 3:
-        ns = np.array([t[0] for t in all_timings], dtype=float)
-        ts = np.array([t[1] for t in all_timings])
+        line = (f"{label:<15s} {n:>5d} {dim:>3d} {med_t:>10.3f} {std_t:>8.3f} "
+                f"{med_m / 1e6:>10.1f}")
+        if baseline and label in baseline.get("synthetic", {}):
+            prev = baseline["synthetic"][label]["time_s"]
+            speedup = prev / med_t if med_t > 0 else float("inf")
+            line += f" {prev:>10.3f} {speedup:>9.2f}x"
+        print(line)
+
+    # --- Extrapolation (scaling configs only, D=2) ---
+    scale_timings = [
+        (r["n"], r["time_s"])
+        for label, r in results["synthetic"].items()
+        if label.startswith("s")
+    ]
+    if len(scale_timings) >= 3:
+        ns = np.array([t[0] for t in scale_timings], dtype=float)
+        ts = np.array([t[1] for t in scale_timings])
         best_model, r2, ext_70k = _fit_best_model(ns, ts)
-        print(f"\n  Complexity fit: {best_model} (R^2={r2:.4f})")
-        if ext_70k < 60:
-            print(f"  N=70K estimate: {ext_70k:.1f} seconds")
-        elif ext_70k < 3600:
-            print(f"  N=70K estimate: {ext_70k / 60:.1f} minutes")
-        elif ext_70k < 86400:
-            print(f"  N=70K estimate: {ext_70k / 3600:.1f} hours")
-        else:
-            print(f"  N=70K estimate: {ext_70k / 86400:.1f} days")
+        print(f"\n  Complexity fit (D=2): {best_model} (R^2={r2:.4f})")
+        _print_time_estimate("  N=70K estimate (D=2)", ext_70k)
+
+    # --- Memory extrapolation ---
+    scale_mems = [
+        (r["n"], r["peak_bytes"])
+        for label, r in results["synthetic"].items()
+        if label.startswith("s")
+    ]
+    if len(scale_mems) >= 3:
+        ns = np.array([t[0] for t in scale_mems], dtype=float)
+        ms = np.array([t[1] for t in scale_mems])
+        coeffs = np.polyfit(ns**2, ms, 1)
+        est_70k = coeffs[0] * 70000**2 + coeffs[1]
+        print(f"  N=70K memory estimate (D=2): {est_70k / 1e9:.0f} GB")
 
     # --- Save as new baseline if --save ---
     if args.save:
@@ -348,6 +401,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
         save_data = {
             "cycle": cycle_num,
             "timestamp": datetime.now().isoformat(),
+            "seeds": seeds,
             "datasets": results["datasets"],
             "synthetic": results["synthetic"],
         }
@@ -434,8 +488,8 @@ def main() -> None:
     # bench
     p_bench = sub.add_parser("bench", help="Benchmark against previous cycle")
     p_bench.add_argument(
-        "--sizes", nargs="+", type=int, default=[100, 250, 500, 750, 1000],
-        help="Synthetic sizes to benchmark",
+        "--seeds", nargs="+", type=int, default=DEFAULT_SEEDS,
+        help="Random seeds for multi-seed benchmark (default: 42 123 777)",
     )
     p_bench.add_argument("--save", action="store_true", help="Save results as new baseline")
 

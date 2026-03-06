@@ -30,12 +30,12 @@ class DefaultContinuity:
         d_ij_norm: float,
         adp_prox: float,
         X: np.ndarray,
-        point_dists: dict[int, list[list]],
+        point_dists: tuple[np.ndarray, np.ndarray],
     ) -> float:
         """Compute continuity score between *lead* and *child*.
 
         Direct port of ``Perception.compute_local_transition`` (L713-860).
-        Returns the smoothness value used as the continuity gate.
+        ``point_dists`` is ``(pd_indices, pd_dists)`` — sorted neighbor arrays.
         """
         return _compute_local_transition(
             lead, child, threshold, d_ij_norm, adp_prox, X, point_dists, self.cfg
@@ -54,7 +54,7 @@ def _compute_local_transition(
     d_ij_norm: float,
     adp_prox: float,
     X: np.ndarray,
-    point_dists: dict[int, list[list]],
+    point_dists: tuple[np.ndarray, np.ndarray],
     cfg: GaugingDeltaConfig,
 ) -> float:
     """Full port of ``compute_local_transition`` (perception.py L713-860)."""
@@ -240,33 +240,34 @@ def _find_local_points(
     radius: float,
     exclude_point: int,
     X: np.ndarray,
-    point_dists: dict[int, list[list]],
+    point_dists: tuple[np.ndarray, np.ndarray],
     *,
     find_all: bool = False,
 ) -> np.ndarray:
     """Port of ``find_local_points`` (perception.py L1410-1427).
 
     Returns (n, 2) array: columns are [point_index, angle].
+    ``point_dists`` is ``(pd_indices, pd_dists)`` — sorted neighbor arrays.
     """
-    # Collect candidates within radius (point_dists is pre-sorted by distance)
-    candidates = []
-    for p_dist in point_dists[point]:
-        if p_dist[1] > radius:
-            break
-        candidates.append(int(p_dist[0]))
+    pd_indices, pd_dists = point_dists
 
-    if not candidates:
+    # Collect candidates within radius (pd_dists[point] is pre-sorted)
+    dists_row = pd_dists[point]
+    cutoff = int(np.searchsorted(dists_row, radius, side="right"))
+    if cutoff == 0:
         return np.empty((0, 2))
 
+    cand_indices = pd_indices[point, :cutoff].copy()
+
     # Batch angle computation (angle is symmetric in left/right)
-    cand_indices = np.array(candidates)
     angles = compute_angle_batch(middle_point, X[cand_indices], X[point], rounding=4)
 
     # Filter by angle criteria
     local_points: list[list[float]] = []
     half_pi = math.pi / 2
     three_half_pi = 3 * math.pi / 2
-    for i, p_idx in enumerate(candidates):
+    for i in range(cutoff):
+        p_idx = int(cand_indices[i])
         angle = float(angles[i])
         if not find_all:
             if (angle <= half_pi or angle >= three_half_pi) and p_idx != exclude_point:
@@ -397,7 +398,7 @@ def _compute_transition_smoothness(
     radius: float,
     r_rate: float,
     X: np.ndarray,
-    point_dists: dict[int, list[list]],
+    point_dists: tuple[np.ndarray, np.ndarray],
     cfg: GaugingDeltaConfig,
 ) -> float:
     """Port of ``compute_transition_smoothness`` (perception.py L1176-1188)."""
@@ -425,7 +426,7 @@ def _compute_transition_state(
     N2: int,
     radius: float,
     X: np.ndarray,
-    point_dists: dict[int, list[list]],
+    point_dists: tuple[np.ndarray, np.ndarray],
 ) -> tuple[float, float, float, float]:
     """Port of ``compute_transition_state`` (perception.py L1363-1370).
 

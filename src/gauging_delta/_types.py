@@ -39,7 +39,7 @@ class ContinuityMetric(Protocol):
         d_ij_norm: float,
         adp_prox: float,
         X: np.ndarray,
-        point_dists: dict[int, list[list]],
+        point_dists: tuple[np.ndarray, np.ndarray],
     ) -> float: ...
 
 

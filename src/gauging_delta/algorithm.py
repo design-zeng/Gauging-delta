@@ -70,7 +70,6 @@ class GaugingDelta:
         # --- Pairwise distances (perception.py L72, L176-220) ---
         self._dist_matrix = np.full((n, n), np.inf)
         self._near_ref = np.empty((n, n), dtype=int)  # _near_ref[i,j] = point in i nearest to j
-        self._point_dists: dict[int, list[list]] = {}
         self._init_distances()
 
         # --- Main merge loop (perception.py L75-127) ---
@@ -139,7 +138,7 @@ class GaugingDelta:
 
         For singleton clusters, near_dist = center_dist = |X[i] - X[j]|.
         We compute all pairwise distances in one vectorized call via
-        scipy.spatial.distance.cdist, then populate point_dists.
+        scipy.spatial.distance.cdist, then build sorted neighbor arrays.
         """
         from scipy.spatial.distance import cdist
 
@@ -155,22 +154,17 @@ class GaugingDelta:
         idx = np.arange(n)
         self._near_ref[:] = idx[:, np.newaxis]
 
-        # Populate point_dists from the dense matrix
-        keys = list(self._clusters.keys())
-        for idx_i in range(n):
-            ci = keys[idx_i]
-            pd_list: list[list] = []
-            for idx_j in range(idx_i + 1, n):
-                cj = keys[idx_j]
-                d = float(pairwise[idx_i, idx_j])
-                pd_list.append([cj, d])
-                self._point_dists.setdefault(cj, []).append([ci, d])
-
-            self._point_dists[ci] = pd_list + self._point_dists.get(ci, [])
-
-        # Sort point_dists per point (perception.py L217-218)
-        for k in self._point_dists:
-            self._point_dists[k].sort(key=lambda x: x[1])
+        # Build sorted neighbor arrays from pairwise matrix (replaces _point_dists dict)
+        # _pd_indices[i] = neighbor indices sorted by distance from point i
+        # _pd_dists[i] = corresponding sorted distances
+        # kind="stable" matches legacy Python list.sort tie-breaking (lower index first)
+        # Mask self-distances to inf so self never appears in sorted neighbors
+        # (simple [:, 1:] fails for duplicate points where pairwise[i,j]=0=pairwise[i,i])
+        pw_no_self = pairwise.copy()
+        np.fill_diagonal(pw_no_self, np.inf)
+        full_order = np.argsort(pw_no_self, axis=1, kind="stable")[:, : n - 1]
+        self._pd_indices = full_order
+        self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
 
         # MIN_BTN_CLUSTER_DIST (perception.py L213)
         upper = pairwise[np.triu_indices(n, k=1)]
@@ -254,7 +248,7 @@ class GaugingDelta:
             d_ij_norm,
             thr.adp_prox,
             self._X,
-            self._point_dists,
+            (self._pd_indices, self._pd_dists),
         )
 
         # Gate: smoothness > threshold → accept merge (perception.py L328)
