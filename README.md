@@ -2,312 +2,186 @@
 
 # Gauging-δ
 
-### A Non-Parametric Hierarchical Clustering Algorithm
-
-[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![IEEE TPAMI](https://img.shields.io/badge/IEEE-TPAMI%202025-orange.svg)](https://doi.org/10.1109/TPAMI.2025.3545573)
-
-*Adaptive hierarchical clustering through proximity statistics and continuity analysis*
-
-[Installation](#installation) · [Quick Start](#quick-start) · [API Reference](#api-reference) · [Citation](#citation)
+[![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
+[![IEEE TPAMI 2025](https://img.shields.io/badge/IEEE_TPAMI-2025-blue.svg)](https://doi.org/10.1109/TPAMI.2025.3545573)
+[![tests](https://img.shields.io/badge/tests-77_passed-brightgreen.svg)](#)
+[![sklearn](https://img.shields.io/badge/API-sklearn--compatible-F7931E?logo=scikit-learn&logoColor=white)](#api-reference)
 
 </div>
 
----
-
-## Overview
-
-**Gauging-δ** is a novel hierarchical clustering algorithm that automatically determines the optimal number of clusters without requiring user-specified parameters. Unlike traditional methods (k-means, DBSCAN), Gauging-δ adapts to local data density and geometric structure through:
-
-- **Proximity Statistics (ρ)** — Measures relative cluster distances against historical merge patterns
-- **Adaptive Thresholds (T)** — Dynamically adjusts mergeability criteria based on environmental context
-- **Continuity Analysis** — Evaluates density transitions and angular smoothness between cluster boundaries
+**Gauging-δ** is a hierarchical agglomerative clustering algorithm that automatically
+determines the number of clusters. Instead of fixed distance thresholds, it evaluates
+merge candidates through *relative proximity* — inter-cluster distance normalized by
+historical merge patterns — and validates boundaries with adaptive thresholds and
+angle-based continuity analysis. 
 
 <div align="center">
 
-![Gauging-δ clustering visualization](assets/readme_plot.png)
+![Gauging-δ clustering on jain, flame, and 3-spiral datasets](assets/readme_plot.png)
 
 </div>
 
-### Key Features
-
-| Feature | Description |
-|---------|-------------|
-| **Non-parametric** | No need to specify k or ε — clusters emerge naturally |
-| **Scalable** | Sparse neighbor graph with O(N log N) complexity |
-| **Robust** | Handles arbitrary cluster shapes, noise, and varying densities |
-| **N-dimensional** | Works with any feature dimensionality |
-
----
-
-## Performance
-
-Three implementation variants are benchmarked across dataset sizes from 100 to 10,000 points:
-
-| Variant | Description | Parity (ARI) | Complexity |
-|---------|-------------|:------------:|------------|
-| **Original** | `perception.py` baseline | — | O(N³+) time, O(N²) space |
-| **Max-Parity** | `GaugingDelta` — refactored | **1.000** | O(N²) time, O(N²) space |
-| **Max-Fast** | `GaugingDeltaFast` — vectorized + KDTree | ≥ 0.95 | O(N²) init, O(N·k) merge |
-
-<div align="center">
-
-![Benchmark results](assets/benchmark_combined.png)
-
-</div>
-
-Run the benchmark yourself (designed for overnight execution):
+## Install
 
 ```bash
-uv sync --extra bench
-uv run python benchmarks/benchmark_all.py
+pip install gauging-delta
 ```
 
----
-
-## Installation
-
-### Using uv (recommended)
+Or with [uv](https://docs.astral.sh/uv/):
 
 ```bash
 uv add gauging-delta
 ```
 
-### From source
+From source:
 
 ```bash
 git clone https://github.com/design-zeng/Gauging-delta.git
-cd Gauging-delta
-uv sync
+cd Gauging-delta && uv sync
 ```
-
-### Development installation
-
-```bash
-uv sync --all-extras
-```
-
----
 
 ## Quick Start
 
-### Basic Usage
+```python
+from gauging_delta import GaugingDelta
+
+labels = GaugingDelta().fit_predict([
+    [0.0, 0.0], [0.5, 0.3], [0.2, 0.1],
+    [8.0, 8.0], [8.5, 8.3], [8.2, 8.1],
+])
+# array([0, 0, 0, 1, 1, 1])
+```
+
+## Usage
+
+### Automatic clustering
 
 ```python
 import numpy as np
 from gauging_delta import GaugingDelta
 
-# Generate sample data
-np.random.seed(42)
+# X is any array-like: list, numpy array, or pandas DataFrame
 X = np.vstack([
     np.random.randn(100, 2) + [0, 0],
     np.random.randn(100, 2) + [5, 5],
     np.random.randn(100, 2) + [10, 0],
 ])
 
-# Fit the model
-model = GaugingDelta()
-labels = model.fit(X)
-
-print(f"Discovered {model.n_clusters_} clusters")
+model = GaugingDelta().fit(X)
+print(model.labels_)       # cluster label per sample
+print(model.n_clusters_)   # number of clusters found
 ```
 
-### With Target Number of Clusters
+### Target a specific number of clusters
 
 ```python
-# Force exactly k clusters
-model = GaugingDelta(k=3)
-labels = model.fit(X)
+model = GaugingDelta(n_clusters=3).fit(X)
+assert model.n_clusters_ == 3
 ```
 
-### Loading Data from Files
+### Lite mode for large datasets
 
 ```python
-import numpy as np
-from gauging_delta import GaugingDelta
-
-# Load comma-separated data (last column may be ground truth)
-data = np.loadtxt("data/aggregation.txt", delimiter=",")
-X = data[:, :-1]  # Features
-y_true = data[:, -1]  # Ground truth labels (optional)
-
-model = GaugingDelta()
-labels = model.fit(X)
+model = GaugingDelta(mode="lite").fit(X)
 ```
 
----
+Lite mode uses centroid linkage and skips continuity analysis.
+Linear memory — scales to millions of points on commodity hardware.
+See [Scaling](#scaling) for projections.
+
+### Works with any array-like input
+
+`fit(X)` accepts anything NumPy can convert — lists, arrays, DataFrames:
+
+```python
+import pandas as pd
+
+df = pd.DataFrame({"x": [1, 3, 10, 12], "y": [2, 4, 11, 13]})
+labels = GaugingDelta().fit_predict(df)
+```
+
+## Scaling
+
+<div align="center">
+
+![Runtime and memory scaling for full and lite modes](assets/scaling_benchmark.png)
+
+</div>
+
+| N | Full time | Full memory | Lite time | Lite memory |
+|---:|---:|---:|---:|---:|
+| 5,000 | 13 s | 1.4 GB | 3 s | 5 MB |
+| 10,000 | 27 s | 5.8 GB | 8 s | 10 MB |
+| 20,000 | ~1 min | 22 GB | 17 s | 21 MB |
+| 35,000 | ~1.8 min | **64 GB** | 35 s | 37 MB |
+| 100,000 | ~6 min | 543 GB* | 2.1 min | 110 MB |
+| 500,000 | ~40 min | — | 13 min | 570 MB |
+| 1,000,000 | ~1.4 hr | — | 36 min | 1.2 GB |
+
+Runtime is projected from measured O(N^1.1) and O(N^1.2) power-law fits.
+Full mode memory is O(N^2) — exceeds 64 GB at N ≈ 35K.
+Lite mode memory is O(N) — exceeds 64 GB at N ≈ 48M.
+
+*\* Full mode runtime projections beyond 35K assume infinite memory; in practice, memory is the bottleneck.*
+
+## Modes
+
+|  | `"full"` (default) | `"lite"` |
+|---|---|---|
+| **Linkage** | Single-link (point-to-point) | Centroid (center-to-center) |
+| **Merge gates** | Proximity + threshold + continuity | Proximity + threshold |
+| **Quality** | Paper-exact (ARI = 1.000 on benchmarks) | Lower — tends to under-merge |
+| **Memory** | O(N^2) | O(N) |
+| **Practical limit** | ~35K samples (64 GB) | Millions |
+| **Use when** | Quality matters | Scale or memory matters |
+
+> Lite mode trades clustering quality for O(N) memory. It is best suited for
+> large-scale exploratory analysis where approximate clusters are acceptable.
+> For publication-quality results, use full mode.
 
 ## API Reference
 
-### `GaugingDelta`
-
-The main clustering class.
+### Constructor
 
 ```python
 GaugingDelta(
-    k: int | None = None,
-    threshold_continuity: float = 0.15,
-    n_neighbors: int = 5,
-    graph_neighbors: int = 50,
+    *,
+    n_clusters=None,
+    mode="full",
+    config=None,
+    proximity=None,
+    continuity=None,
+    linkage=None,
+    preserve_labels=False,
 )
 ```
 
-#### Parameters
+All parameters are keyword-only.
 
 | Parameter | Type | Default | Description |
-|-----------|------|---------|-------------|
-| `k` | `int \| None` | `None` | Target number of clusters. If `None`, determined automatically. |
-| `threshold_continuity` | `float` | `0.15` | Continuity threshold T_c for merge decisions. |
-| `n_neighbors` | `int` | `5` | Number of neighboring clusters for environmental context. |
-| `graph_neighbors` | `int` | `50` | k-nearest neighbors for sparse graph construction. |
+|---|---|---|---|
+| `n_clusters` | `int \| None` | `None` | Target cluster count. `None` = automatic. |
+| `mode` | `str` | `"full"` | `"full"` or `"lite"`. See [Modes](#modes). |
+| `config` | `GaugingDeltaConfig \| None` | `None` | Algorithm constants. Defaults are the paper's values. |
+| `proximity` | `ProximityMetric \| None` | `None` | Custom proximity metric (full mode only). |
+| `continuity` | `ContinuityMetric \| None` | `None` | Custom continuity metric (full mode only). |
+| `linkage` | `LinkageMetric \| None` | `None` | Custom linkage metric (full mode only). |
+| `preserve_labels` | `bool` | `False` | Keep internal cluster IDs instead of renumbering to 0..k-1. |
 
-#### Methods
+### Methods
 
 | Method | Returns | Description |
-|--------|---------|-------------|
-| `fit(X)` | `np.ndarray` | Fit the model and return cluster labels. |
-| `fit_predict(X)` | `np.ndarray` | Alias for `fit()`. |
+|---|---|---|
+| `fit(X)` | `self` | Fit the model. *X* is array-like of shape *(n_samples, n_features)*. |
+| `fit_predict(X)` | `np.ndarray` | Fit and return cluster labels. |
 
-#### Attributes (after fitting)
+### Attributes (available after `fit`)
 
 | Attribute | Type | Description |
-|-----------|------|-------------|
-| `labels_` | `np.ndarray` | Cluster label for each sample. |
+|---|---|---|
+| `labels_` | `np.ndarray` | Cluster label for each sample, shape *(n_samples,)*. |
 | `n_clusters_` | `int` | Number of clusters found. |
-| `clusters_` | `dict` | Dictionary of `Cluster` objects. |
-
----
-
-## Algorithm Overview
-
-Gauging-δ implements a hierarchical agglomerative clustering approach with adaptive merge criteria:
-
-```
-Algorithm 1: Gauging-δ Clustering
-─────────────────────────────────────────────────────────
-Input: Data X ∈ ℝ^(n×d)
-Output: Cluster labels y ∈ ℤ^n
-
-1. Initialize each point as its own cluster
-2. Build sparse k-NN neighbor graph
-3. while merge candidates exist:
-    4.   Extract closest cluster pair (C_i, C_j) from heap
-    5.   Compute proximity statistic ρ = d_ij / μ_historical
-    6.   Compute adaptive thresholds T_i, T_j
-    7.   if ρ ≤ min(T_i, T_j):
-    8.       Compute continuity score
-    9.       if continuity > T_c:
-    10.          Merge C_i and C_j
-    11.          Update neighbor graph
-12. Return cluster assignments
-```
-
-### Mathematical Foundation
-
-**Proximity Statistic (Eq. 3)**
-```
-ρ = d_ij / μ_historical
-```
-
-**Adaptive Threshold (Eq. 4)**
-```
-T = β_ij × T_stat × ξ_s
-```
-
-Where:
-- `β_ij` — Environmental scaling factor based on neighboring cluster forces
-- `T_stat` — Statistical threshold from merge history distribution  
-- `ξ_s` — Shape similarity factor between clusters
-
----
-
-## Datasets
-
-The `data/` directory contains benchmark datasets evaluated in the paper:
-
-| Dataset | Points | Clusters | Description |
-|---------|--------|----------|-------------|
-| `3-spiral.txt` | 312 | 3 | Interleaved spirals |
-| `3_blobs.txt` | 300 | 3 | Gaussian blobs |
-| `aggregation.txt` | 788 | 7 | Mixed shapes |
-| `atom.txt` | 800 | 2 | Nested structures |
-| `chainlink.txt` | 1000 | 2 | Linked rings |
-| `compound.txt` | 399 | 6 | Compound shapes |
-| `flame.txt` | 240 | 2 | Flame pattern |
-| `jain.txt` | 373 | 2 | Crescent moons |
-| `lsun.txt` | 400 | 3 | L-shaped clusters |
-| `pathbased.txt` | 300 | 3 | Path-connected |
-
-**Data Format**: CSV with coordinates in columns 1 to d, optional ground truth label in last column.
-
----
-
-## Project Structure
-
-```
-Gauging-delta/
-├── src/gauging_delta/
-│   ├── core/
-│   │   ├── algorithm.py      # Main GaugingDelta class
-│   │   ├── cluster.py        # Cluster data structures
-│   │   └── neighbor_graph.py # Sparse k-NN graph
-│   ├── geometry/
-│   │   ├── angles.py         # Angle calculations
-│   │   └── spatial.py        # KDTree spatial queries
-│   ├── mergeability/
-│   │   ├── proximity.py      # ρ computation
-│   │   ├── threshold.py      # T, β, F, ξ computation
-│   │   └── continuity.py     # Continuity analysis
-│   ├── utils/
-│   │   └── math_utils.py     # Safe division, sigmoid, clamp
-│   └── visualization/
-│       └── plotter.py        # Matplotlib cluster plots
-├── benchmarks/
-│   ├── benchmark_all.py      # Runtime, space & parity benchmarks
-│   └── test_performance.py   # Pytest-based performance tests
-├── tests/                    # Comprehensive test suite
-└── data/                     # Benchmark datasets
-```
-
----
-
-## Development
-
-### Setup
-
-```bash
-# Clone and install with dev dependencies
-git clone https://github.com/design-zeng/Gauging-delta.git
-cd Gauging-delta
-uv sync --extra dev
-
-# Install pre-commit hooks
-pre-commit install
-```
-
-### Available Commands
-
-```bash
-make help        # Show all available commands
-make test        # Run test suite
-make lint        # Run linter (ruff)
-make format      # Format code (ruff)
-make typecheck   # Run type checker (mypy)
-make check       # Run all checks (lint, typecheck, test)
-```
-
-### Code Quality Tools
-
-| Tool | Purpose | Config |
-|------|---------|--------|
-| **Ruff** | Linting & formatting | `pyproject.toml` |
-| **Mypy** | Static type checking | `pyproject.toml` |
-| **Pytest** | Testing framework | `pyproject.toml` |
-| **Pre-commit** | Git hooks | `.pre-commit-config.yaml` |
-| **Bandit** | Security scanning | `pyproject.toml` |
-
----
 
 ## Citation
 
@@ -327,16 +201,6 @@ If you use Gauging-δ in your research, please cite:
 }
 ```
 
----
-
 ## License
 
-This project is licensed under the MIT License — see the [LICENSE](LICENSE) file for details.
-
----
-
-<div align="center">
-
-**[⬆ Back to Top](#gauging-δ)**
-
-</div>
+MIT — see [LICENSE](LICENSE).
