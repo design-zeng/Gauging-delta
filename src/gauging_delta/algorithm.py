@@ -195,12 +195,8 @@ class GaugingDelta:
     def _get_nearest_cluster(self, cid: int) -> int | None:
         """Nearest active cluster to *cid* (perception.py L105)."""
         row = self._dist_matrix[cid, :]
-        k = 1
-        k = min(k, row.size)
-        idx = np.argpartition(row, k)[:k]
-        idx = idx[np.argsort(row[idx])]
-        nearest = int(idx[0])
-        if np.isinf(self._dist_matrix[cid, nearest]):
+        nearest = int(np.argmin(row))
+        if np.isinf(row[nearest]):
             return None
         return nearest
 
@@ -328,17 +324,18 @@ class GaugingDelta:
         if min_i == child_id or min_j == child_id:
             # Cached position gone (child merged away).  Full scan needed
             # because the global min could be anywhere in the unchanged matrix.
-            self._cached_dist_min = float(self._dist_matrix.min())
+            flat_idx = int(np.argmin(self._dist_matrix))
+            n = self._dist_matrix.shape[0]
+            self._cached_dist_min = float(self._dist_matrix.ravel()[flat_idx])
             if not np.isinf(self._cached_dist_min):
-                flat_idx = int(np.argmin(self._dist_matrix))
-                n = self._dist_matrix.shape[0]
                 self._min_pos = (flat_idx // n, flat_idx % n)
         else:
             # Cached position still valid.  Lead row may have decreased.
-            lead_row_min = float(np.min(self._dist_matrix[lead_id, :]))
+            lead_argmin = int(np.argmin(self._dist_matrix[lead_id, :]))
+            lead_row_min = float(self._dist_matrix[lead_id, lead_argmin])
             if lead_row_min < self._cached_dist_min:
                 self._cached_dist_min = lead_row_min
-                self._min_pos = (lead_id, int(np.argmin(self._dist_matrix[lead_id, :])))
+                self._min_pos = (lead_id, lead_argmin)
         if not np.isinf(self._cached_dist_min):
             self._fallback_dist = max(self._cached_dist_min, self._fallback_dist)
 

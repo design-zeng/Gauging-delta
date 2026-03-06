@@ -385,45 +385,35 @@ def _find_smallest_angle_pair(
     points: np.ndarray,
     X: np.ndarray,
 ) -> tuple[float, float]:
-    """Fused dual _find_smallest_angle: compute v1 and rp angles once, reuse for pa and pb."""
+    """Fused dual _find_smallest_angle: batch all 3 reference vectors (rp, pa, pb)."""
     if len(points) == 0:
         return math.pi, math.pi
 
     v_indices = points[:, 0].astype(int)
-    v1 = X[v_indices] - start_p  # (n, d) — shared across pa, pb, rp
-    norms1 = np.linalg.norm(v1, axis=1)  # (n,) — shared
+    v1 = X[v_indices] - start_p  # (n, d)
+    norms1 = np.linalg.norm(v1, axis=1)  # (n,)
 
-    # Compute rp angles once (shared across pa and pb)
-    v2r = X[rp] - start_p
-    norm2r = float(np.linalg.norm(v2r))
-    dots_r = v1 @ v2r
-    norm_prods_r = norms1 * norm2r
-    nonzero_r = np.round(norm_prods_r, 4) != 0
-    r_thetas = np.zeros(len(v_indices), dtype=float)
-    if np.any(nonzero_r):
-        cos_r = np.clip(np.round(dots_r[nonzero_r] / norm_prods_r[nonzero_r], 4), -1.0, 1.0)
-        r_thetas[nonzero_r] = np.arccos(cos_r)
+    # Batch all 3 reference vectors into one matmul
+    v2_all = X[np.array([rp, pa, pb])] - start_p  # (3, d)
+    norms_all = np.linalg.norm(v2_all, axis=1)  # (3,)
+    dots_all = v1 @ v2_all.T  # (n, 3)
+    norm_prods_all = norms1[:, None] * norms_all  # (n, 3)
 
-    # Compute pa and pb angles, reusing v1/norms1
-    results: list[float] = []
-    for p_idx in (pa, pb):
-        v2 = X[p_idx] - start_p
-        norm2 = float(np.linalg.norm(v2))
-        dots = v1 @ v2
-        norm_prods = norms1 * norm2
-        nonzero = np.round(norm_prods, 4) != 0
-        thetas = np.zeros(len(v_indices), dtype=float)
-        if np.any(nonzero):
-            cos_vals = np.clip(np.round(dots[nonzero] / norm_prods[nonzero], 4), -1.0, 1.0)
-            thetas[nonzero] = np.arccos(cos_vals)
+    nonzero_all = np.round(norm_prods_all, 4) != 0
+    safe_norm_prods = np.where(nonzero_all, norm_prods_all, 1.0)
+    cos_all = np.clip(np.round(dots_all / safe_norm_prods, 4), -1.0, 1.0)
+    thetas_all = np.where(nonzero_all, np.arccos(cos_all), 0.0)
 
-        mask = r_thetas >= thetas
-        if np.any(mask):
-            results.append(float(np.min(thetas[mask])))
-        else:
-            results.append(math.pi)
+    r_thetas = thetas_all[:, 0]
 
-    return results[0], results[1]
+    # For pa and pb: find min angle where r_thetas >= thetas
+    pa_filtered = np.where(r_thetas >= thetas_all[:, 1], thetas_all[:, 1], np.inf)
+    pb_filtered = np.where(r_thetas >= thetas_all[:, 2], thetas_all[:, 2], np.inf)
+    min_a = float(np.min(pa_filtered))
+    min_b = float(np.min(pb_filtered))
+
+    return (min_a if not np.isinf(min_a) else math.pi,
+            min_b if not np.isinf(min_b) else math.pi)
 
 
 def _compute_transition_smoothness(
