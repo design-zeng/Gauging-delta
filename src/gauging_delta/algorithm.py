@@ -24,10 +24,20 @@ class GaugingDelta:
     ----------
     n_clusters : int or None
         Target number of clusters.  ``None`` = let the algorithm decide.
+    mode : {'full', 'lite'}, default='full'
+        Algorithm variant.
+
+        - ``'full'``: Single-linkage distances with angle-based continuity
+          analysis.  Highest quality; O(N²) memory for 4 dense arrays.
+        - ``'lite'``: Centroid-linkage distances, no continuity gate.
+          ~4× lower memory (1 dense array); suitable for larger datasets.
+
+        When ``mode='lite'``, the *continuity* and *linkage* parameters
+        are ignored.
     config : GaugingDeltaConfig or None
         All magic numbers.  Defaults are the paper's values.
     proximity, continuity, linkage : Protocol-compatible objects or None
-        Swappable algorithm components.
+        Swappable algorithm components (used in ``mode='full'`` only).
     preserve_labels : bool
         If *True*, ``labels_`` keeps the internal cluster IDs instead
         of renumbering to ``0 … n_clusters_-1``.
@@ -37,6 +47,7 @@ class GaugingDelta:
         self,
         *,
         n_clusters: int | None = None,
+        mode: str = "full",
         config: GaugingDeltaConfig | None = None,
         proximity: ProximityMetric | None = None,
         continuity: ContinuityMetric | None = None,
@@ -44,16 +55,24 @@ class GaugingDelta:
         preserve_labels: bool = False,
     ) -> None:
         self.n_clusters = n_clusters
+        self.mode = mode
         self.config = config or GaugingDeltaConfig()
         self.proximity = proximity or DefaultProximity()
-        self.continuity = continuity or DefaultContinuity(self.config)
-        self.linkage = linkage or DefaultLinkage()
+        if mode == "full":
+            self.continuity = continuity or DefaultContinuity(self.config)
+            self.linkage = linkage or DefaultLinkage()
+        else:
+            self.continuity = continuity  # type: ignore[assignment]
+            self.linkage = linkage  # type: ignore[assignment]
         self.preserve_labels = preserve_labels
 
     # ----- sklearn-compatible interface ------------------------------------
 
     def fit(self, X: np.ndarray) -> GaugingDelta:
         """Run Gauging-delta on data matrix *X* (n_samples, n_features)."""
+        if self.mode not in ("full", "lite"):
+            raise ValueError(f"mode must be 'full' or 'lite', got {self.mode!r}")
+
         self._X = np.asarray(X, dtype=float)
         n = len(self._X)
 
@@ -69,7 +88,8 @@ class GaugingDelta:
 
         # --- Pairwise distances (perception.py L72, L176-220) ---
         self._dist_matrix = np.full((n, n), np.inf)
-        self._near_ref = np.empty((n, n), dtype=int)  # _near_ref[i,j] = point in i nearest to j
+        if self.mode == "full":
+            self._near_ref = np.empty((n, n), dtype=int)
         self._init_distances()
 
         # --- Main merge loop (perception.py L75-127) ---
@@ -134,12 +154,14 @@ class GaugingDelta:
     # ----- Distance initialisation -----------------------------------------
 
     def _init_distances(self) -> None:
-        """Port of ``initiate_dists`` (perception.py L176-220).
+        """Initialise distance matrix and supporting structures."""
+        if self.mode == "lite":
+            self._init_distances_lite()
+        else:
+            self._init_distances_full()
 
-        For singleton clusters, near_dist = center_dist = |X[i] - X[j]|.
-        We compute all pairwise distances in one vectorized call via
-        scipy.spatial.distance.cdist, then build sorted neighbor arrays.
-        """
+    def _init_distances_full(self) -> None:
+        """Full mode: single-linkage distances + sorted neighbor arrays."""
         from scipy.spatial.distance import cdist
 
         n = len(self._X)
@@ -174,6 +196,30 @@ class GaugingDelta:
         upper.sort()
         self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
 
+    def _init_distances_lite(self) -> None:
+        """Lite mode: centroid distances only (no neighbor arrays)."""
+        from scipy.spatial.distance import cdist
+
+        n = len(self._X)
+        if n <= 1:
+            np.fill_diagonal(self._dist_matrix, np.inf)
+            self._row_argmins = np.zeros(n, dtype=int)
+            self._row_mins = np.full(n, np.inf)
+            self._fallback_dist = 0.0
+            return
+
+        # For singletons, centroid distance = point-to-point distance
+        pairwise = cdist(self._X, self._X)
+        self._dist_matrix = pairwise.copy()
+        np.fill_diagonal(self._dist_matrix, np.inf)
+
+        # Row-wise min tracking (shared infrastructure)
+        self._row_argmins = np.argmin(self._dist_matrix, axis=1).astype(int)
+        self._row_mins = self._dist_matrix[np.arange(n), self._row_argmins].copy()
+        upper = pairwise[np.triu_indices(n, k=1)]
+        upper.sort()
+        self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
+
     # ----- Sorted pairs ----------------------------------------------------
 
     def _get_sorted_pairs(self) -> np.ndarray:
@@ -200,11 +246,13 @@ class GaugingDelta:
     # ----- Mergeability pipeline -------------------------------------------
 
     def _try_merge(self, c1: int, c2: int) -> int | None:
-        """Run proximity → threshold → continuity pipeline.
+        """Run mergeability pipeline. Dispatches based on *mode*."""
+        if self.mode == "lite":
+            return self._try_merge_lite(c1, c2)
+        return self._try_merge_full(c1, c2)
 
-        Returns lead cluster ID on success, None on failure.
-        Port of ``vision_generic`` (perception.py L309-342).
-        """
+    def _try_merge_full(self, c1: int, c2: int) -> int | None:
+        """Full mode: proximity → threshold → continuity → merge."""
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
         d_ij: float = float(self._dist_matrix[c1, c2])
@@ -260,14 +308,51 @@ class GaugingDelta:
 
         return None
 
+    def _try_merge_lite(self, c1: int, c2: int) -> int | None:
+        """Lite mode: proximity → threshold → merge (no continuity)."""
+        C_i = self._clusters[c1]
+        C_j = self._clusters[c2]
+        d_ij: float = float(self._dist_matrix[c1, c2])
+
+        # Step 1: Proximity
+        prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
+        rho = prox.rho
+        lead_id, child_id = prox.lead_id, prox.child_id
+        lead = self._clusters[lead_id]
+
+        # Step 2: Adaptive threshold
+        thr = compute_adaptive_threshold(
+            lead,
+            self._clusters[child_id],
+            d_ij,
+            rho,
+            self._clusters,
+            self._dist_matrix,
+            self.config,
+        )
+
+        # Gate: proximity > threshold → reject
+        if rho > thr.T_i or rho > thr.T_j:
+            return None
+
+        # No continuity gate — merge directly
+        lead.merge_history.append(d_ij)
+        lead.merging_dists.append(d_ij)
+
+        self._do_merge(lead_id, child_id)
+        return lead_id
+
     # ----- Merge execution -------------------------------------------------
 
     def _do_merge(self, lead_id: int, child_id: int) -> None:
-        """Combine *child* into *lead* and update distances.
+        """Merge *child* into *lead* and update distances."""
+        if self.mode == "lite":
+            self._do_merge_lite(lead_id, child_id)
+        else:
+            self._do_merge_full(lead_id, child_id)
 
-        Port of ``merge_2_cluster`` (perception.py L293-307) +
-        ``update_clusters`` (perception.py L277-291).
-        """
+    def _do_merge_full(self, lead_id: int, child_id: int) -> None:
+        """Full mode: Lance-Williams single-linkage update."""
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
@@ -353,6 +438,77 @@ class GaugingDelta:
         if not np.isinf(current_min):
             self._fallback_dist = max(current_min, self._fallback_dist)
 
+    def _do_merge_lite(self, lead_id: int, child_id: int) -> None:
+        """Lite mode: recompute centroid distances after merge."""
+        lead = self._clusters[lead_id]
+        child = self._clusters[child_id]
+
+        # --- Merge data ---
+        lead.merge_edges.extend(child.merge_edges)
+        lead.point_indices.extend(child.point_indices)
+        lead.center = np.mean(self._X[lead.point_indices], axis=0)
+
+        dist_data = np.linalg.norm(self._X[lead.point_indices] - lead.center, axis=1)
+        lead.mu_dist = float(np.mean(dist_data))
+        lead.sigma_dist = float(np.std(dist_data))
+        lead.sigma_history.append(lead.sigma_dist)
+        lead.merge_history.extend(child.merge_history)
+
+        # --- Delete child ---
+        del self._clusters[child_id]
+        self._dist_matrix[:, child_id] = np.inf
+        self._dist_matrix[child_id, :] = np.inf
+
+        # --- Recompute lead centroid distances to all active clusters ---
+        active_ids = np.array([c for c in self._clusters if c != lead_id])
+        if len(active_ids) > 0:
+            centers = np.array([self._clusters[c].center for c in active_ids])
+            dists = np.linalg.norm(centers - lead.center, axis=1)
+            self._dist_matrix[lead_id, active_ids] = dists
+            self._dist_matrix[active_ids, lead_id] = dists
+
+        # --- Row-wise min tracking (centroid distances can increase) ---
+        self._row_mins[child_id] = np.inf
+
+        # Lead row: full rescan (center moved)
+        lead_min_col = int(np.argmin(self._dist_matrix[lead_id, :]))
+        self._row_argmins[lead_id] = lead_min_col
+        self._row_mins[lead_id] = self._dist_matrix[lead_id, lead_min_col]
+
+        if len(active_ids) > 0:
+            old_argmins = self._row_argmins[active_ids]
+            new_lead_dists = self._dist_matrix[active_ids, lead_id]
+
+            # Rows whose argmin was child (stale) or lead with increased distance
+            was_child = old_argmins == child_id
+            was_lead = old_argmins == lead_id
+            lead_worse = was_lead & (new_lead_dists > self._row_mins[active_ids])
+            needs_rescan = active_ids[was_child | lead_worse]
+
+            for c in needs_rescan:
+                c_min_col = int(np.argmin(self._dist_matrix[c, :]))
+                self._row_argmins[c] = c_min_col
+                self._row_mins[c] = self._dist_matrix[c, c_min_col]
+
+            # Rows where argmin was lead and distance decreased: update value
+            lead_ok = active_ids[was_lead & ~lead_worse]
+            if len(lead_ok) > 0:
+                self._row_mins[lead_ok] = self._dist_matrix[lead_ok, lead_id]
+
+            # Other rows: check if new lead distance beats current min
+            other = active_ids[~was_child & ~was_lead]
+            if len(other) > 0:
+                other_dists = self._dist_matrix[other, lead_id]
+                improved = other_dists < self._row_mins[other]
+                update_idx = other[improved]
+                self._row_mins[update_idx] = other_dists[improved]
+                self._row_argmins[update_idx] = lead_id
+
+        # Global min → update fallback_dist
+        current_min = float(np.min(self._row_mins))
+        if not np.isinf(current_min):
+            self._fallback_dist = max(current_min, self._fallback_dist)
+
     # ----- Post-processing -------------------------------------------------
 
     def _post_processing(self) -> None:
@@ -379,7 +535,7 @@ class GaugingDelta:
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
-        if not np.isinf(self._dist_matrix[lead_id, child_id]):
+        if self.mode == "full" and not np.isinf(self._dist_matrix[lead_id, child_id]):
             p1 = int(self._near_ref[lead_id, child_id])
             p2 = int(self._near_ref[child_id, lead_id])
             lead.merge_edges.append((p1, p2))
