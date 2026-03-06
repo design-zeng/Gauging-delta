@@ -87,8 +87,8 @@ class GaugingDelta:
         }
 
         # --- Pairwise distances (perception.py L72, L176-220) ---
-        self._dist_matrix = np.full((n, n), np.inf)
         if self.mode == "full":
+            self._dist_matrix = np.full((n, n), np.inf)
             self._near_ref = np.empty((n, n), dtype=int)
         self._init_distances()
 
@@ -110,18 +110,32 @@ class GaugingDelta:
                     break
 
                 # Skip dead pairs (perception.py L97)
-                if np.isinf(self._dist_matrix[c1, c2]):
+                if self.mode == "lite":
+                    if c1 not in self._clusters or c2 not in self._clusters:
+                        i += 1
+                        continue
+                elif np.isinf(self._dist_matrix[c1, c2]):
                     i += 1
                     continue
 
                 # last_merged heuristic (perception.py L104-113)
                 if last_merged is not None:
                     _c = self._get_nearest_cluster(last_merged)
-                    if (
-                        _c is not None
-                        and self._dist_matrix[last_merged, _c] < self._dist_matrix[c1, c2]
-                    ):
-                        c1, c2 = last_merged, _c
+                    if _c is not None:
+                        if self.mode == "lite":
+                            d_lm = float(np.linalg.norm(
+                                self._clusters[last_merged].center - self._clusters[_c].center
+                            ))
+                            d_pair = float(np.linalg.norm(
+                                self._clusters[c1].center - self._clusters[c2].center
+                            ))
+                            closer = d_lm < d_pair
+                        else:
+                            closer = self._dist_matrix[last_merged, _c] < self._dist_matrix[c1, c2]
+                        if closer:
+                            c1, c2 = last_merged, _c
+                        else:
+                            i += 1
                     else:
                         i += 1
                     last_merged = None
@@ -197,28 +211,34 @@ class GaugingDelta:
         self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
 
     def _init_distances_lite(self) -> None:
-        """Lite mode: centroid distances only (no neighbor arrays)."""
-        from scipy.spatial.distance import cdist
+        """Lite mode: build KDTree over initial singleton centroids."""
+        from scipy.spatial import cKDTree
 
         n = len(self._X)
+        D = self._X.shape[1] if self._X.ndim > 1 else 1
+
         if n <= 1:
-            np.fill_diagonal(self._dist_matrix, np.inf)
-            self._row_argmins = np.zeros(n, dtype=int)
-            self._row_mins = np.full(n, np.inf)
             self._fallback_dist = 0.0
+            self._lite_tree = None
+            self._lite_ids = list(self._clusters.keys())
+            self._lite_centers = self._X.copy() if n == 1 else np.empty((0, D))
+            self._lite_id_to_pos = {cid: i for i, cid in enumerate(self._lite_ids)}
+            self._lite_K = n
             return
 
-        # For singletons, centroid distance = point-to-point distance
-        pairwise = cdist(self._X, self._X)
-        self._dist_matrix = pairwise.copy()
-        np.fill_diagonal(self._dist_matrix, np.inf)
+        # Build arrays: _lite_centers is (N, D) with room for shrinking via _lite_K
+        self._lite_ids = list(range(n))
+        self._lite_centers = self._X.copy()  # singletons → centers = data points
+        self._lite_id_to_pos = {i: i for i in range(n)}
+        self._lite_K = n
+        self._lite_tree = cKDTree(self._lite_centers)
 
-        # Row-wise min tracking (shared infrastructure)
-        self._row_argmins = np.argmin(self._dist_matrix, axis=1).astype(int)
-        self._row_mins = self._dist_matrix[np.arange(n), self._row_argmins].copy()
-        upper = pairwise[np.triu_indices(n, k=1)]
-        upper.sort()
-        self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
+        # Compute fallback_dist from nearest-neighbor distances
+        nn_dists, _ = self._lite_tree.query(self._lite_centers, k=2)
+        nn_sorted = np.sort(nn_dists[:, 1])
+        self._fallback_dist = float(
+            nn_sorted[max(0, int(len(nn_sorted) * self.config.min_dist_percentile))]
+        )
 
     # ----- Sorted pairs ----------------------------------------------------
 
@@ -227,6 +247,8 @@ class GaugingDelta:
 
         Returns (2, k) array of (row, col) pairs sorted by distance.
         """
+        if self.mode == "lite":
+            return self._get_sorted_pairs_lite()
         k = len(self._X)
         mat = self._dist_matrix
         flat = mat.ravel()
@@ -237,11 +259,78 @@ class GaugingDelta:
         order = np.argsort(values)
         return ind[:, order]
 
+    def _get_sorted_pairs_lite(self) -> np.ndarray:
+        """Sorted candidate pairs via KDTree (rebuilt once per outer loop)."""
+        from scipy.spatial import cKDTree
+
+        K = self._lite_K
+        if K <= 1:
+            return np.empty((2, 0), dtype=int)
+
+        # Rebuild KDTree from active portion of centers array
+        centers = self._lite_centers[:K]
+        self._lite_tree = cKDTree(centers)
+
+        # Adaptive k: match original's coverage
+        entries_per_cluster = min(K - 1, max(1, len(self._X) // K))
+        k_query = entries_per_cluster + 1  # +1 for self
+        dists_arr, idxs_arr = self._lite_tree.query(centers, k=min(k_query, K))
+
+        # Ensure 2D
+        if dists_arr.ndim == 1:
+            dists_arr = dists_arr.reshape(1, -1)
+            idxs_arr = idxs_arr.reshape(1, -1)
+
+        # Update fallback_dist
+        if K >= 2:
+            current_min = float(np.min(dists_arr[:, 1]))
+            if not np.isinf(current_min):
+                self._fallback_dist = max(current_min, self._fallback_dist)
+
+        # Build unique pairs sorted by distance
+        # Skip self-pairs (nn == i) which can occur when KDTree returns the
+        # queried point itself due to tie-breaking with duplicate points.
+        seen: set[tuple[int, int]] = set()
+        pairs_list: list[tuple[int, int, float]] = []
+        for i in range(K):
+            for j in range(1, idxs_arr.shape[1]):
+                nn = int(idxs_arr[i, j])
+                if nn == i:  # skip self-pair from KDTree tie-breaking
+                    continue
+                d = float(dists_arr[i, j])
+                c1, c2 = self._lite_ids[i], self._lite_ids[nn]
+                pair_key = (min(c1, c2), max(c1, c2))
+                if pair_key not in seen:
+                    seen.add(pair_key)
+                    pairs_list.append((c1, c2, d))
+
+        pairs_list.sort(key=lambda x: x[2])
+        if not pairs_list:
+            return np.empty((2, 0), dtype=int)
+        return np.array([[p[0] for p in pairs_list], [p[1] for p in pairs_list]])
+
     def _get_nearest_cluster(self, cid: int) -> int | None:
-        """Nearest active cluster to *cid* (perception.py L105). O(1) lookup."""
+        """Nearest active cluster to *cid*."""
+        if self.mode == "lite":
+            return self._get_nearest_cluster_lite(cid)
+        # Full mode: O(1) lookup from cached row mins
         if np.isinf(self._row_mins[cid]):
             return None
         return int(self._row_argmins[cid])
+
+    def _get_nearest_cluster_lite(self, cid: int) -> int | None:
+        """Nearest active cluster via brute-force centroid scan (O(K·D))."""
+        K = self._lite_K
+        if K < 2:
+            return None
+        if cid not in self._lite_id_to_pos:
+            return None
+        center = self._clusters[cid].center
+        pos = self._lite_id_to_pos[cid]
+        dists = np.linalg.norm(self._lite_centers[:K] - center, axis=1)
+        dists[pos] = np.inf
+        nearest_pos = int(np.argmin(dists))
+        return self._lite_ids[nearest_pos]
 
     # ----- Mergeability pipeline -------------------------------------------
 
@@ -310,9 +399,11 @@ class GaugingDelta:
 
     def _try_merge_lite(self, c1: int, c2: int) -> int | None:
         """Lite mode: proximity → threshold → merge (no continuity)."""
+        from gauging_delta.threshold import compute_adaptive_threshold_lite
+
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
-        d_ij: float = float(self._dist_matrix[c1, c2])
+        d_ij = float(np.linalg.norm(C_i.center - C_j.center))
 
         # Step 1: Proximity
         prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
@@ -320,14 +411,16 @@ class GaugingDelta:
         lead_id, child_id = prox.lead_id, prox.child_id
         lead = self._clusters[lead_id]
 
-        # Step 2: Adaptive threshold
-        thr = compute_adaptive_threshold(
+        # Step 2: Adaptive threshold (brute-force centers array, no KDTree)
+        thr = compute_adaptive_threshold_lite(
             lead,
             self._clusters[child_id],
             d_ij,
             rho,
             self._clusters,
-            self._dist_matrix,
+            self._lite_centers[: self._lite_K],
+            self._lite_ids,
+            self._lite_id_to_pos,
             self.config,
         )
 
@@ -439,7 +532,7 @@ class GaugingDelta:
             self._fallback_dist = max(current_min, self._fallback_dist)
 
     def _do_merge_lite(self, lead_id: int, child_id: int) -> None:
-        """Lite mode: recompute centroid distances after merge."""
+        """Lite mode: merge cluster data, swap-and-pop centers array (O(D))."""
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
@@ -456,58 +549,36 @@ class GaugingDelta:
 
         # --- Delete child ---
         del self._clusters[child_id]
-        self._dist_matrix[:, child_id] = np.inf
-        self._dist_matrix[child_id, :] = np.inf
 
-        # --- Recompute lead centroid distances to all active clusters ---
-        active_ids = np.array([c for c in self._clusters if c != lead_id])
-        if len(active_ids) > 0:
-            centers = np.array([self._clusters[c].center for c in active_ids])
-            dists = np.linalg.norm(centers - lead.center, axis=1)
-            self._dist_matrix[lead_id, active_ids] = dists
-            self._dist_matrix[active_ids, lead_id] = dists
+        # --- Swap-and-pop child from arrays (O(D)) ---
+        child_pos = self._lite_id_to_pos[child_id]
+        self._lite_K -= 1
+        last_pos = self._lite_K
 
-        # --- Row-wise min tracking (centroid distances can increase) ---
-        self._row_mins[child_id] = np.inf
+        if child_pos != last_pos:
+            last_id = self._lite_ids[last_pos]
+            self._lite_ids[child_pos] = last_id
+            self._lite_centers[child_pos] = self._lite_centers[last_pos]
+            self._lite_id_to_pos[last_id] = child_pos
 
-        # Lead row: full rescan (center moved)
-        lead_min_col = int(np.argmin(self._dist_matrix[lead_id, :]))
-        self._row_argmins[lead_id] = lead_min_col
-        self._row_mins[lead_id] = self._dist_matrix[lead_id, lead_min_col]
+        self._lite_ids.pop()
+        del self._lite_id_to_pos[child_id]
 
-        if len(active_ids) > 0:
-            old_argmins = self._row_argmins[active_ids]
-            new_lead_dists = self._dist_matrix[active_ids, lead_id]
+        # Update lead's center in-place
+        lead_pos = self._lite_id_to_pos[lead_id]
+        self._lite_centers[lead_pos] = lead.center
 
-            # Rows whose argmin was child (stale) or lead with increased distance
-            was_child = old_argmins == child_id
-            was_lead = old_argmins == lead_id
-            lead_worse = was_lead & (new_lead_dists > self._row_mins[active_ids])
-            needs_rescan = active_ids[was_child | lead_worse]
+        # Update fallback_dist from lead's nearest neighbor (O(K·D))
+        K = self._lite_K
+        if K >= 2:
+            dists = np.linalg.norm(self._lite_centers[:K] - lead.center, axis=1)
+            dists[lead_pos] = np.inf
+            current_min = float(np.min(dists))
+            if not np.isinf(current_min):
+                self._fallback_dist = max(current_min, self._fallback_dist)
 
-            for c in needs_rescan:
-                c_min_col = int(np.argmin(self._dist_matrix[c, :]))
-                self._row_argmins[c] = c_min_col
-                self._row_mins[c] = self._dist_matrix[c, c_min_col]
-
-            # Rows where argmin was lead and distance decreased: update value
-            lead_ok = active_ids[was_lead & ~lead_worse]
-            if len(lead_ok) > 0:
-                self._row_mins[lead_ok] = self._dist_matrix[lead_ok, lead_id]
-
-            # Other rows: check if new lead distance beats current min
-            other = active_ids[~was_child & ~was_lead]
-            if len(other) > 0:
-                other_dists = self._dist_matrix[other, lead_id]
-                improved = other_dists < self._row_mins[other]
-                update_idx = other[improved]
-                self._row_mins[update_idx] = other_dists[improved]
-                self._row_argmins[update_idx] = lead_id
-
-        # Global min → update fallback_dist
-        current_min = float(np.min(self._row_mins))
-        if not np.isinf(current_min):
-            self._fallback_dist = max(current_min, self._fallback_dist)
+        # Mark tree as stale (will be rebuilt in _get_sorted_pairs_lite)
+        self._lite_tree = None
 
     # ----- Post-processing -------------------------------------------------
 
@@ -522,8 +593,15 @@ class GaugingDelta:
         top_k_ids = {c[0] for c in top_k}
         merging_pairs: list[list[int]] = []
 
-        for cid, _ in remaining:
-            dists = [(tid, self._dist_matrix[tid, cid]) for tid in top_k_ids]
+        for cid, cluster in remaining:
+            if self.mode == "lite":
+                c_center = cluster.center
+                dists = [
+                    (tid, float(np.linalg.norm(self._clusters[tid].center - c_center)))
+                    for tid in top_k_ids
+                ]
+            else:
+                dists = [(tid, self._dist_matrix[tid, cid]) for tid in top_k_ids]
             nearest = min(dists, key=lambda x: x[1])
             merging_pairs.append([nearest[0], cid])
 
@@ -551,8 +629,9 @@ class GaugingDelta:
         lead.merge_history.extend(child.merge_history)
 
         del self._clusters[child_id]
-        self._dist_matrix[:, child_id] = np.inf
-        self._dist_matrix[child_id, :] = np.inf
+        if self.mode == "full":
+            self._dist_matrix[:, child_id] = np.inf
+            self._dist_matrix[child_id, :] = np.inf
 
     # ----- Label construction ----------------------------------------------
 

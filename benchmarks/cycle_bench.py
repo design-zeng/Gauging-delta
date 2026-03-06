@@ -45,6 +45,7 @@ from scipy.optimize import curve_fit
 ROOT = Path(__file__).resolve().parent.parent
 RESULTS_DIR = ROOT / "benchmarks" / "results"
 BASELINE_PATH = RESULTS_DIR / "cycle_baseline.json"
+BASELINE_PATH_LITE = RESULTS_DIR / "cycle_baseline_lite.json"
 sys.path.insert(0, str(ROOT))
 
 DATA_DIR = ROOT / "data"
@@ -153,14 +154,14 @@ def _fit_best_model(sizes: np.ndarray, times: np.ndarray) -> tuple[str, float, f
 # profile subcommand
 # ---------------------------------------------------------------------------
 
-def _run_timed(X: np.ndarray) -> tuple[np.ndarray, float, float]:
+def _run_timed(X: np.ndarray, mode: str = "full") -> tuple[np.ndarray, float, float]:
     """Run GaugingDelta, return (labels, time_s, peak_bytes)."""
     from gauging_delta import GaugingDelta
 
     gc.collect()
     tracemalloc.start()
     t0 = time.perf_counter()
-    model = GaugingDelta(preserve_labels=True)
+    model = GaugingDelta(mode=mode, preserve_labels=True)
     model.fit(X.copy())
     elapsed = time.perf_counter() - t0
     _, peak = tracemalloc.get_traced_memory()
@@ -173,9 +174,10 @@ def cmd_profile(args: argparse.Namespace) -> None:
     from gauging_delta import GaugingDelta
 
     sizes = args.sizes
+    mode = args.mode
 
     print("=" * 60)
-    print("Cycle Profiler")
+    print(f"Cycle Profiler (mode={mode})")
     print("=" * 60)
 
     # --- 1. cProfile on the target dataset ---
@@ -199,7 +201,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         pr.enable()
-        model = GaugingDelta(preserve_labels=True)
+        model = GaugingDelta(mode=mode, preserve_labels=True)
         model.fit(X.copy())
         pr.disable()
 
@@ -222,7 +224,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
     print("-" * 60)
     gc.collect()
     tracemalloc.start()
-    model2 = GaugingDelta(preserve_labels=True)
+    model2 = GaugingDelta(mode=mode, preserve_labels=True)
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
         model2.fit(X.copy())
@@ -243,7 +245,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
 
     for n in sizes:
         X_synth = _make_blobs(n, seed=42)
-        _, elapsed, mem = _run_timed(X_synth)
+        _, elapsed, mem = _run_timed(X_synth, mode=mode)
         timing_data.append((n, elapsed, mem))
         print(f"  N={n:>6d}  time={elapsed:>8.3f}s  mem={mem / 1e6:>8.1f} MB")
 
@@ -272,7 +274,8 @@ def cmd_profile(args: argparse.Namespace) -> None:
         profile_data["best_fit_r2"] = r2
         profile_data["extrapolated_70k_s"] = ext_70k
 
-    out_path = RESULTS_DIR / "cycle_profile.json"
+    suffix = "_lite" if mode == "lite" else ""
+    out_path = RESULTS_DIR / f"cycle_profile{suffix}.json"
     with open(out_path, "w") as f:
         json.dump(profile_data, f, indent=2)
     print(f"\n  Saved profile to {out_path}")
@@ -283,7 +286,7 @@ def cmd_profile(args: argparse.Namespace) -> None:
 # ---------------------------------------------------------------------------
 
 def _run_multi_seed(
-    n: int, dim: int, seeds: list[int],
+    n: int, dim: int, seeds: list[int], mode: str = "full",
 ) -> tuple[float, float, float, float]:
     """Run multiple seeds, return (median_time, std_time, median_mem, std_mem)."""
     times, mems = [], []
@@ -291,7 +294,7 @@ def _run_multi_seed(
         X = _make_blobs(n, dim=dim, seed=seed)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            _, elapsed, mem = _run_timed(X)
+            _, elapsed, mem = _run_timed(X, mode=mode)
         times.append(elapsed)
         mems.append(mem)
     return (
@@ -305,15 +308,17 @@ def _run_multi_seed(
 def cmd_bench(args: argparse.Namespace) -> None:
     """Benchmark against previous cycle's baseline."""
     seeds = args.seeds
+    mode = args.mode
+    baseline_path = BASELINE_PATH_LITE if mode == "lite" else BASELINE_PATH
 
     print("=" * 60)
-    print(f"Cycle Benchmark (seeds={seeds})")
+    print(f"Cycle Benchmark (mode={mode}, seeds={seeds})")
     print("=" * 60)
 
     # Load baseline if exists
     baseline = None
-    if BASELINE_PATH.exists():
-        with open(BASELINE_PATH) as f:
+    if baseline_path.exists():
+        with open(baseline_path) as f:
             baseline = json.load(f)
         print(f"  Baseline loaded: cycle {baseline.get('cycle', '?')} "
               f"({baseline.get('timestamp', '?')[:19]})")
@@ -335,7 +340,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
         X = _load_dataset(path)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", RuntimeWarning)
-            _, elapsed, mem = _run_timed(X)
+            _, elapsed, mem = _run_timed(X, mode=mode)
 
         results["datasets"][name] = {
             "n": len(X), "time_s": elapsed, "peak_bytes": mem,
@@ -358,7 +363,7 @@ def cmd_bench(args: argparse.Namespace) -> None:
     print("-" * (55 + (22 if baseline else 0)))
 
     for label, n, dim in synth_configs:
-        med_t, std_t, med_m, std_m = _run_multi_seed(n, dim, seeds)
+        med_t, std_t, med_m, std_m = _run_multi_seed(n, dim, seeds, mode=mode)
 
         results["synthetic"][label] = {
             "n": n, "dim": dim, "seeds": seeds,
@@ -396,9 +401,17 @@ def cmd_bench(args: argparse.Namespace) -> None:
     if len(scale_mems) >= 3:
         ns = np.array([t[0] for t in scale_mems], dtype=float)
         ms = np.array([t[1] for t in scale_mems])
-        coeffs = np.polyfit(ns**2, ms, 1)
-        est_70k = coeffs[0] * 70000**2 + coeffs[1]
-        print(f"  N=70K memory estimate (D=2): {est_70k / 1e9:.0f} GB")
+        if mode == "lite":
+            # Lite mode: O(N·D) memory — fit linear model
+            coeffs = np.polyfit(ns, ms, 1)
+            est_70k = coeffs[0] * 70000 + coeffs[1]
+        else:
+            coeffs = np.polyfit(ns**2, ms, 1)
+            est_70k = coeffs[0] * 70000**2 + coeffs[1]
+        if est_70k > 1e9:
+            print(f"  N=70K memory estimate (D=2): {est_70k / 1e9:.0f} GB")
+        else:
+            print(f"  N=70K memory estimate (D=2): {est_70k / 1e6:.0f} MB")
 
     # --- Save as new baseline if --save ---
     if args.save:
@@ -406,14 +419,15 @@ def cmd_bench(args: argparse.Namespace) -> None:
         cycle_num = (baseline.get("cycle", 0) + 1) if baseline else 0
         save_data = {
             "cycle": cycle_num,
+            "mode": mode,
             "timestamp": datetime.now().isoformat(),
             "seeds": seeds,
             "datasets": results["datasets"],
             "synthetic": results["synthetic"],
         }
-        with open(BASELINE_PATH, "w") as f:
+        with open(baseline_path, "w") as f:
             json.dump(save_data, f, indent=2)
-        print(f"\n  Saved as cycle {cycle_num} baseline to {BASELINE_PATH}")
+        print(f"\n  Saved as cycle {cycle_num} baseline to {baseline_path}")
     elif not args.save and baseline:
         print("\n  (use --save to update baseline)")
 
@@ -487,6 +501,10 @@ def main() -> None:
     p_prof = sub.add_parser("profile", help="Profile hotspots and memory")
     p_prof.add_argument("--dataset", type=str, default=None, help="Dataset to profile (default: synthetic)")
     p_prof.add_argument(
+        "--mode", choices=["full", "lite"], default="full",
+        help="Algorithm mode to profile (default: full)",
+    )
+    p_prof.add_argument(
         "--profile-n", type=int, default=5000,
         help="Synthetic blob size for cProfile (default: 5000). Ignored when --dataset is set.",
     )
@@ -497,6 +515,10 @@ def main() -> None:
 
     # bench
     p_bench = sub.add_parser("bench", help="Benchmark against previous cycle")
+    p_bench.add_argument(
+        "--mode", choices=["full", "lite"], default="full",
+        help="Algorithm mode to benchmark (default: full)",
+    )
     p_bench.add_argument(
         "--seeds", nargs="+", type=int, default=DEFAULT_SEEDS,
         help="Random seeds for multi-seed benchmark (default: 42 123 777)",

@@ -171,6 +171,159 @@ def _compute_t_stat(cluster: Cluster, cfg: GaugingDeltaConfig) -> float:
     return cfg.t_stat_fallback
 
 
+def compute_adaptive_threshold_lite(
+    lead: Cluster,
+    child: Cluster,
+    d_ij: float,
+    rho: float,
+    all_clusters: dict[int, Cluster],
+    centers: np.ndarray,  # (K, D) array of active cluster centers
+    center_ids: list[int],  # maps position → cluster ID
+    center_id_to_pos: dict[int, int],  # maps cluster ID → position
+    cfg: GaugingDeltaConfig,
+) -> ThresholdResult:
+    """Lite-mode adaptive threshold using brute-force centroid scans.
+
+    Replaces KDTree queries with O(K·D) numpy norm computations.
+    In lite mode, all inter-cluster distances are centroid distances.
+    """
+    size1 = len(lead)
+    size2 = len(child)
+    c1_id = lead.label
+    c2_id = child.label
+
+    k = min(len(all_clusters) - 1, cfg.num_nearest_clusters)
+    K = len(center_ids)
+
+    # --- Step 1: K nearest clusters via brute-force (O(K·D) each) ---
+    if K < 2:
+        nd1 = np.array([d_ij])
+        nd2 = np.array([d_ij])
+        idx1_ids = np.array([c2_id])
+        idx2_ids = np.array([c1_id])
+    else:
+        k_actual = min(k, K - 1)
+
+        # Brute-force KNN for lead
+        dists1 = np.linalg.norm(centers - lead.center, axis=1)
+        pos1 = center_id_to_pos[c1_id]
+        dists1[pos1] = np.inf  # exclude self
+        if k_actual > 0:
+            idx1 = np.argpartition(dists1, k_actual)[:k_actual]
+            order1 = np.argsort(dists1[idx1])
+            idx1 = idx1[order1]
+        else:
+            idx1 = np.array([], dtype=int)
+
+        # Brute-force KNN for child
+        dists2 = np.linalg.norm(centers - child.center, axis=1)
+        pos2 = center_id_to_pos[c2_id]
+        dists2[pos2] = np.inf  # exclude self
+        if k_actual > 0:
+            idx2 = np.argpartition(dists2, k_actual)[:k_actual]
+            order2 = np.argsort(dists2[idx2])
+            idx2 = idx2[order2]
+        else:
+            idx2 = np.array([], dtype=int)
+
+        nd1 = dists1[idx1]
+        nd2 = dists2[idx2]
+        idx1_ids = np.array([center_ids[j] for j in idx1])
+        idx2_ids = np.array([center_ids[j] for j in idx2])
+
+    nd1 = nd1[~np.isinf(nd1)]
+    nd2 = nd2[~np.isinf(nd2)]
+
+    # --- Step 2: vision scale / beta ---
+    vision_scale = _compute_vision_scale_lite(
+        c1_id, c2_id, d_ij, idx1_ids, idx2_ids, all_clusters, cfg
+    )
+
+    # --- Step 3: T_stat per cluster ---
+    t1 = _compute_t_stat(lead, cfg) * vision_scale
+    t2 = _compute_t_stat(child, cfg) * vision_scale
+
+    # --- Step 4: shape similarity xi_s ---
+    xi_s = _compute_xi_s(lead, child, cfg)
+    t1 *= xi_s
+    t2 *= xi_s
+
+    adp_prox = t1 * size1 / (size1 + size2) + t2 * size2 / (size1 + size2)
+    return ThresholdResult(T_i=t1, T_j=t2, xi_s=xi_s, adp_prox=adp_prox)
+
+
+def _compute_force_lite(
+    c1_id: int,
+    c2_id: int,
+    all_clusters: dict[int, Cluster],
+) -> float:
+    """Gravitational force using centroid distance only (lite mode)."""
+    if c1_id not in all_clusters or c2_id not in all_clusters:
+        return 0.0
+    d = float(np.linalg.norm(all_clusters[c1_id].center - all_clusters[c2_id].center))
+    if d == 0:
+        # Legacy behavior: numpy division produces inf
+        return float(
+            np.float64(len(all_clusters[c1_id]) * len(all_clusters[c2_id])) / np.float64(0) ** 2
+        )
+    m1 = len(all_clusters[c1_id])
+    m2 = len(all_clusters[c2_id])
+    return float(np.float64(m1 * m2) / np.float64(d) ** 2)
+
+
+def _compute_vision_scale_lite(
+    c1_id: int,
+    c2_id: int,
+    d_ij: float,
+    idx1_ids: np.ndarray,
+    idx2_ids: np.ndarray,
+    all_clusters: dict[int, Cluster],
+    cfg: GaugingDeltaConfig,
+) -> float:
+    """Force-weighted environmental scaling using direct centroid distances (lite mode)."""
+    base_force = _compute_force_lite(c1_id, c2_id, all_clusters)
+    if base_force == 0:
+        return 1.0
+
+    set2 = set(idx2_ids.tolist()) if len(idx2_ids) > 0 else set()
+    forces: list[tuple[float, int]] = [(1.0, c2_id)]
+    for c_int in idx1_ids:
+        c_int = int(c_int)
+        if c_int in set2:
+            f1 = _compute_force_lite(c_int, c1_id, all_clusters)
+            f2 = _compute_force_lite(c_int, c2_id, all_clusters)
+            forces.append((math.sqrt(f1 * f2) / base_force, c_int))
+
+    if not forces:
+        return 1.0
+
+    forces.sort(key=lambda x: x[0], reverse=True)
+
+    cont_clusters: list[tuple[float, float]] = []
+    total_affect = 0.0
+    for weight, cid in forces:
+        d_c1 = float(np.linalg.norm(all_clusters[cid].center - all_clusters[c1_id].center))
+        d_c2 = (
+            float(np.linalg.norm(all_clusters[cid].center - all_clusters[c2_id].center))
+            if cid != c2_id
+            else d_c1
+        )
+        cont_clusters.append((weight, (d_c2 + d_c1) / 2))
+        total_affect += weight
+        if len(cont_clusters) == cfg.n_contextual_clusters:
+            break
+
+    vs = 0.0
+    for weight, avg_d in cont_clusters:
+        dist_ratio = d_ij / avg_d if avg_d != 0 else cfg.vision_scale_dist_ratio_fallback
+        _vs = (
+            cfg.vision_scale_coeff / (1 + math.e ** (cfg.vision_scale_exp * dist_ratio))
+            + cfg.vision_scale_offset
+        )
+        vs += _vs * weight / total_affect
+    return vs
+
+
 def _compute_xi_s(lead: Cluster, child: Cluster, cfg: GaugingDeltaConfig) -> float:
     """Shape similarity xi_s (perception.py L419-466).
 

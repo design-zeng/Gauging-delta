@@ -1,7 +1,7 @@
 # Makefile for Gauging-δ development
 # Usage: make <target>
 
-.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity cycle-profile cycle-bench cycle-verify cycle-memray
+.PHONY: help install dev test lint format typecheck security clean all check benchmark bench-test bench-full bench-parity bench-parity-deep bench-stress bench-stress-deep gate-parity cycle-profile cycle-bench cycle-verify cycle-memray cycle-profile-lite cycle-bench-lite
 
 # Default target
 help:
@@ -26,6 +26,8 @@ help:
 	@echo "  make gate-parity       Gate-by-gate parity verification"
 	@echo "  make cycle-profile     Profile hotspots + memory + N=70K estimate"
 	@echo "  make cycle-bench       Benchmark vs previous cycle baseline"
+	@echo "  make cycle-profile-lite Profile lite mode"
+	@echo "  make cycle-bench-lite  Benchmark lite mode vs previous baseline"
 	@echo "  make cycle-verify      Targeted gate parity (GATES=2,3)"
 	@echo "  make cycle-memray      Memory flamegraph via memray (MEMRAY_N=2000)"
 	@echo "  make clean      Remove build artifacts"
@@ -98,6 +100,12 @@ cycle-profile:
 
 cycle-bench:
 	uv run python benchmarks/cycle_bench.py bench
+
+cycle-profile-lite:
+	uv run python benchmarks/cycle_bench.py profile --mode lite
+
+cycle-bench-lite:
+	uv run python benchmarks/cycle_bench.py bench --mode lite
 
 cycle-verify:
 	uv run python benchmarks/cycle_bench.py verify $(if $(GATES),--gates $(GATES),)

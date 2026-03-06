@@ -100,7 +100,22 @@ class TestLiteMemory:
     def test_has_dist_matrix(self):
         X = np.array([[0.0, 0.0], [1.0, 0.0], [10.0, 10.0], [11.0, 10.0]])
         gd = GaugingDelta(mode="lite").fit(X)
-        assert hasattr(gd, "_dist_matrix")
+        assert not hasattr(gd, "_dist_matrix") or not isinstance(gd._dist_matrix, np.ndarray)
+
+    def test_no_row_tracking(self):
+        X = np.array([[0.0, 0.0], [1.0, 0.0], [10.0, 10.0], [11.0, 10.0]])
+        gd = GaugingDelta(mode="lite").fit(X)
+        assert not hasattr(gd, "_row_argmins")
+        assert not hasattr(gd, "_row_mins")
+
+    def test_has_lite_tree(self):
+        X = np.array([[0.0, 0.0], [1.0, 0.0], [10.0, 10.0], [11.0, 10.0]])
+        gd = GaugingDelta(mode="lite").fit(X)
+        assert hasattr(gd, "_lite_tree")
+        assert hasattr(gd, "_lite_ids")
+        assert hasattr(gd, "_lite_centers")
+        assert hasattr(gd, "_lite_id_to_pos")
+        # _lite_tree may be None after fit completes (only live during _get_sorted_pairs_lite)
 
 
 # ---------------------------------------------------------------------------
