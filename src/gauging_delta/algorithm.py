@@ -167,6 +167,10 @@ class GaugingDelta:
         self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
 
         # MIN_BTN_CLUSTER_DIST (perception.py L213)
+        # Track matrix minimum incrementally: position + value
+        self._cached_dist_min = float(self._dist_matrix.min())
+        flat_idx = int(np.argmin(self._dist_matrix))
+        self._min_pos = (flat_idx // n, flat_idx % n)
         upper = pairwise[np.triu_indices(n, k=1)]
         upper.sort()
         self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
@@ -318,9 +322,25 @@ class GaugingDelta:
         self._near_ref[winning, lead_id] = child_ref_other[winning]
 
         # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
-        current_min = self._dist_matrix.min()
-        if not np.isinf(current_min):
-            self._fallback_dist = max(current_min, self._fallback_dist)
+        # Incremental: track position of matrix minimum.  Only the lead row
+        # changed (Lance-Williams: values decrease or stay) and child row → inf.
+        min_i, min_j = self._min_pos
+        if min_i == child_id or min_j == child_id:
+            # Cached position gone (child merged away).  Full scan needed
+            # because the global min could be anywhere in the unchanged matrix.
+            self._cached_dist_min = float(self._dist_matrix.min())
+            if not np.isinf(self._cached_dist_min):
+                flat_idx = int(np.argmin(self._dist_matrix))
+                n = self._dist_matrix.shape[0]
+                self._min_pos = (flat_idx // n, flat_idx % n)
+        else:
+            # Cached position still valid.  Lead row may have decreased.
+            lead_row_min = float(np.min(self._dist_matrix[lead_id, :]))
+            if lead_row_min < self._cached_dist_min:
+                self._cached_dist_min = lead_row_min
+                self._min_pos = (lead_id, int(np.argmin(self._dist_matrix[lead_id, :])))
+        if not np.isinf(self._cached_dist_min):
+            self._fallback_dist = max(self._cached_dist_min, self._fallback_dist)
 
     # ----- Post-processing -------------------------------------------------
 

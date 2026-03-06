@@ -172,19 +172,24 @@ def cmd_profile(args: argparse.Namespace) -> None:
     from gauging_delta import GaugingDelta
 
     sizes = args.sizes
-    dataset = args.dataset or "compound"
 
     print("=" * 60)
     print("Cycle Profiler")
     print("=" * 60)
 
     # --- 1. cProfile on the target dataset ---
-    path = BENCHMARK_DATASETS.get(dataset)
-    if path and path.exists():
-        X = _load_dataset(path)
+    if args.dataset:
+        dataset = args.dataset
+        path = BENCHMARK_DATASETS.get(dataset)
+        if path and path.exists():
+            X = _load_dataset(path)
+        else:
+            print(f"Dataset '{dataset}' not found, using synthetic N={args.profile_n}")
+            dataset = f"synthetic_{args.profile_n}"
+            X = _make_blobs(args.profile_n)
     else:
-        print(f"Dataset '{dataset}' not found, using synthetic N=500")
-        X = _make_blobs(500)
+        dataset = f"synthetic_{args.profile_n}"
+        X = _make_blobs(args.profile_n)
 
     print(f"\ncProfile on {dataset} (N={len(X)}):")
     print("-" * 60)
@@ -479,9 +484,13 @@ def main() -> None:
 
     # profile
     p_prof = sub.add_parser("profile", help="Profile hotspots and memory")
-    p_prof.add_argument("--dataset", type=str, default="compound", help="Dataset to profile")
+    p_prof.add_argument("--dataset", type=str, default=None, help="Dataset to profile (default: synthetic)")
     p_prof.add_argument(
-        "--sizes", nargs="+", type=int, default=[100, 250, 500, 750, 1000],
+        "--profile-n", type=int, default=2000,
+        help="Synthetic blob size for cProfile (default: 2000). Ignored when --dataset is set.",
+    )
+    p_prof.add_argument(
+        "--sizes", nargs="+", type=int, default=[500, 1000, 2000, 3000],
         help="Synthetic sizes for scaling measurement",
     )
 
