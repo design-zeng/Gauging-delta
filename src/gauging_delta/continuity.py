@@ -257,29 +257,33 @@ def _find_local_points(
     if cutoff == 0:
         return np.empty((0, 2))
 
-    cand_indices = pd_indices[point, :cutoff].copy()
+    cand_indices = pd_indices[point, :cutoff]
 
     # Batch angle computation (angle is symmetric in left/right)
     angles = compute_angle_batch(middle_point, X[cand_indices], X[point], rounding=4)
 
-    # Filter by angle criteria
-    local_points: list[list[float]] = []
+    # Vectorized filter by angle criteria
     half_pi = math.pi / 2
-    three_half_pi = 3 * math.pi / 2
-    for i in range(cutoff):
-        p_idx = int(cand_indices[i])
-        angle = float(angles[i])
-        if not find_all:
-            if (angle <= half_pi or angle >= three_half_pi) and p_idx != exclude_point:
-                _angle = angle if angle <= half_pi else angle - 2 * math.pi
-                local_points.append([p_idx, _angle])
-        else:
-            angle = angle if angle <= math.pi else angle - 2 * math.pi
-            local_points.append([p_idx, angle])
+    if not find_all:
+        three_half_pi = 3 * math.pi / 2
+        mask = ((angles <= half_pi) | (angles >= three_half_pi)) & (cand_indices != exclude_point)
+        if not np.any(mask):
+            return np.empty((0, 2))
+        filt_idx = cand_indices[mask]
+        filt_ang = angles[mask].copy()
+        # Adjust angles > 3π/2 → subtract 2π
+        wrap = filt_ang >= three_half_pi
+        filt_ang[wrap] -= 2 * math.pi
+    else:
+        filt_idx = cand_indices
+        filt_ang = angles.copy()
+        # Adjust angles > π → subtract 2π
+        wrap = filt_ang > math.pi
+        filt_ang[wrap] -= 2 * math.pi
 
-    if not local_points:
-        return np.empty((0, 2))
-    result = np.array(sorted(local_points, key=lambda x: x[1]))
+    # Sort by adjusted angle
+    order = np.argsort(filt_ang, kind="stable")
+    result = np.column_stack((filt_idx[order].astype(float), filt_ang[order]))
     return result
 
 
@@ -354,12 +358,12 @@ def _compute_angle_transition(
     middle_point = (X[p1] + X[p2]) / 2
     _p1, _p2, _p3, _p4 = max_points
 
-    transition_angles = [
-        _find_smallest_angle(middle_point, _p1, p1, local_points2, X),
-        _find_smallest_angle(middle_point, _p2, p1, local_points2, X),
-        _find_smallest_angle(middle_point, _p3, p2, local_points1, X),
-        _find_smallest_angle(middle_point, _p4, p2, local_points1, X),
-    ]
+    # Fused: calls 1-2 share local_points2 and start_p=middle_point
+    # Calls 3-4 share local_points1 and start_p=middle_point
+    a1, a2 = _find_smallest_angle_pair(middle_point, _p1, _p2, p1, local_points2, X)
+    a3, a4 = _find_smallest_angle_pair(middle_point, _p3, _p4, p2, local_points1, X)
+
+    transition_angles = [a1, a2, a3, a4]
     angle_transition = [
         2 * math.fabs(min(a, math.fabs(a - math.pi)) - math.pi / 2) / math.pi
         for a in transition_angles
@@ -367,26 +371,53 @@ def _compute_angle_transition(
     return float(np.mean(angle_transition))
 
 
-def _find_smallest_angle(
+def _find_smallest_angle_pair(
     start_p: np.ndarray,
-    p: int,
+    pa: int,
+    pb: int,
     rp: int,
     points: np.ndarray,
     X: np.ndarray,
-) -> float:
-    """Port of inner ``find_smallest_angle`` (perception.py L1046-1053)."""
+) -> tuple[float, float]:
+    """Fused dual _find_smallest_angle: compute v1 and rp angles once, reuse for pa and pb."""
     if len(points) == 0:
-        return math.pi
+        return math.pi, math.pi
 
     v_indices = points[:, 0].astype(int)
-    thetas = compute_angle_batch(start_p, X[v_indices], X[p])
-    r_thetas = compute_angle_batch(start_p, X[v_indices], X[rp])
+    v1 = X[v_indices] - start_p  # (n, d) — shared across pa, pb, rp
+    norms1 = np.linalg.norm(v1, axis=1)  # (n,) — shared
 
-    # Find minimum theta where r_theta >= theta
-    mask = r_thetas >= thetas
-    if np.any(mask):
-        return float(np.min(thetas[mask]))
-    return math.pi
+    # Compute rp angles once (shared across pa and pb)
+    v2r = X[rp] - start_p
+    norm2r = float(np.linalg.norm(v2r))
+    dots_r = v1 @ v2r
+    norm_prods_r = norms1 * norm2r
+    nonzero_r = np.round(norm_prods_r, 4) != 0
+    r_thetas = np.zeros(len(v_indices), dtype=float)
+    if np.any(nonzero_r):
+        cos_r = np.clip(np.round(dots_r[nonzero_r] / norm_prods_r[nonzero_r], 4), -1.0, 1.0)
+        r_thetas[nonzero_r] = np.arccos(cos_r)
+
+    # Compute pa and pb angles, reusing v1/norms1
+    results: list[float] = []
+    for p_idx in (pa, pb):
+        v2 = X[p_idx] - start_p
+        norm2 = float(np.linalg.norm(v2))
+        dots = v1 @ v2
+        norm_prods = norms1 * norm2
+        nonzero = np.round(norm_prods, 4) != 0
+        thetas = np.zeros(len(v_indices), dtype=float)
+        if np.any(nonzero):
+            cos_vals = np.clip(np.round(dots[nonzero] / norm_prods[nonzero], 4), -1.0, 1.0)
+            thetas[nonzero] = np.arccos(cos_vals)
+
+        mask = r_thetas >= thetas
+        if np.any(mask):
+            results.append(float(np.min(thetas[mask])))
+        else:
+            results.append(math.pi)
+
+    return results[0], results[1]
 
 
 def _compute_transition_smoothness(
