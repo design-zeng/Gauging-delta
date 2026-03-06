@@ -158,16 +158,25 @@ def _compute_t_stat(cluster: Cluster, cfg: GaugingDeltaConfig) -> float:
     """Statistical threshold from merge history (perception.py L402-417).
 
     T_stat = numerator / (1 + e^(coeff * mu/sigma)) + offset
+    Cached on cluster; invalidated when merge_history length changes.
     """
-    if len(cluster.merge_history) > cfg.t_stat_min_history:
+    mh_len = len(cluster.merge_history)
+    cache = getattr(cluster, "_t_stat_cache", None)
+    if cache is not None and cache[0] == mh_len:
+        return cache[1]
+    if mh_len > cfg.t_stat_min_history:
         mu = float(np.mean(cluster.merge_history))
         sigma = float(np.std(cluster.merge_history))
         if sigma != 0 and mu != 0:
-            return float(
+            result = float(
                 cfg.t_stat_numerator / (1 + math.e ** (cfg.t_stat_exp_coeff * mu / sigma))
                 + cfg.t_stat_offset
             )
+            cluster._t_stat_cache = (mh_len, result)  # type: ignore[attr-defined]
+            return result
+        cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)  # type: ignore[attr-defined]
         return cfg.t_stat_fallback
+    cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)  # type: ignore[attr-defined]
     return cfg.t_stat_fallback
 
 
@@ -260,7 +269,8 @@ def _compute_force_lite(
     """Gravitational force using centroid distance only (lite mode)."""
     if c1_id not in all_clusters or c2_id not in all_clusters:
         return 0.0
-    d = float(np.linalg.norm(all_clusters[c1_id].center - all_clusters[c2_id].center))
+    diff = all_clusters[c1_id].center - all_clusters[c2_id].center
+    d = math.sqrt(float(diff @ diff))
     if d == 0:
         # Legacy behavior: numpy division produces inf
         return float(
@@ -302,12 +312,13 @@ def _compute_vision_scale_lite(
     cont_clusters: list[tuple[float, float]] = []
     total_affect = 0.0
     for weight, cid in forces:
-        d_c1 = float(np.linalg.norm(all_clusters[cid].center - all_clusters[c1_id].center))
-        d_c2 = (
-            float(np.linalg.norm(all_clusters[cid].center - all_clusters[c2_id].center))
-            if cid != c2_id
-            else d_c1
-        )
+        diff_c1 = all_clusters[cid].center - all_clusters[c1_id].center
+        d_c1 = math.sqrt(float(diff_c1 @ diff_c1))
+        if cid != c2_id:
+            diff_c2 = all_clusters[cid].center - all_clusters[c2_id].center
+            d_c2 = math.sqrt(float(diff_c2 @ diff_c2))
+        else:
+            d_c2 = d_c1
         cont_clusters.append((weight, (d_c2 + d_c1) / 2))
         total_affect += weight
         if len(cont_clusters) == cfg.n_contextual_clusters:
@@ -334,7 +345,7 @@ def _compute_xi_s(lead: Cluster, child: Cluster, cfg: GaugingDeltaConfig) -> flo
     n2 = len(child.sigma_history)
     n = min(n1, n2)
 
-    if n2 <= 1:
+    if n2 <= 1 or n <= cfg.xi_s_min_history:
         return 1.0
 
     # perception.py L423-456

@@ -6,6 +6,8 @@ Port of ``Perception.fit`` (perception.py L48-146) and supporting methods.
 
 from __future__ import annotations
 
+import math
+
 import numpy as np
 
 from gauging_delta._types import ContinuityMetric, LinkageMetric, ProximityMetric
@@ -92,6 +94,14 @@ class GaugingDelta:
             self._near_ref = np.empty((n, n), dtype=int)
         self._init_distances()
 
+        # Precompute rho rejection bound for lite mode (max possible threshold)
+        if self.mode == "lite":
+            cfg = self.config
+            self._rho_reject_bound = (
+                (cfg.vision_scale_coeff / 2 + cfg.vision_scale_offset)
+                * max(cfg.t_stat_numerator / 2 + cfg.t_stat_offset, cfg.t_stat_fallback)
+            )
+
         # --- Main merge loop (perception.py L75-127) ---
         early_stop = False
         while len(self._clusters) > 1:
@@ -123,12 +133,10 @@ class GaugingDelta:
                     _c = self._get_nearest_cluster(last_merged)
                     if _c is not None:
                         if self.mode == "lite":
-                            d_lm = float(np.linalg.norm(
-                                self._clusters[last_merged].center - self._clusters[_c].center
-                            ))
-                            d_pair = float(np.linalg.norm(
-                                self._clusters[c1].center - self._clusters[c2].center
-                            ))
+                            _diff = self._clusters[last_merged].center - self._clusters[_c].center
+                            d_lm = math.sqrt(float(_diff @ _diff))
+                            _diff = self._clusters[c1].center - self._clusters[c2].center
+                            d_pair = math.sqrt(float(_diff @ _diff))
                             closer = d_lm < d_pair
                         else:
                             closer = self._dist_matrix[last_merged, _c] < self._dist_matrix[c1, c2]
@@ -403,11 +411,17 @@ class GaugingDelta:
 
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
-        d_ij = float(np.linalg.norm(C_i.center - C_j.center))
+        _diff = C_i.center - C_j.center
+        d_ij = math.sqrt(float(_diff @ _diff))
 
         # Step 1: Proximity
         prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
         rho = prox.rho
+
+        # Short-circuit: rho exceeds maximum possible threshold → skip threshold
+        if rho > self._rho_reject_bound:
+            return None
+
         lead_id, child_id = prox.lead_id, prox.child_id
         lead = self._clusters[lead_id]
 
@@ -596,10 +610,10 @@ class GaugingDelta:
         for cid, cluster in remaining:
             if self.mode == "lite":
                 c_center = cluster.center
-                dists = [
-                    (tid, float(np.linalg.norm(self._clusters[tid].center - c_center)))
-                    for tid in top_k_ids
-                ]
+                dists = []
+                for tid in top_k_ids:
+                    _d = self._clusters[tid].center - c_center
+                    dists.append((tid, math.sqrt(float(_d @ _d))))
             else:
                 dists = [(tid, self._dist_matrix[tid, cid]) for tid in top_k_ids]
             nearest = min(dists, key=lambda x: x[1])
