@@ -345,7 +345,7 @@ def _run_new_staged(X: np.ndarray) -> tuple[np.ndarray, list[StageResult]]:
     tracemalloc.start()
     t0 = time.perf_counter()
     model._dist_matrix = np.full((n, n), np.inf)
-    model._clusters_dist = {}
+    model._near_ref = np.empty((n, n), dtype=int)
     model._point_dists = {}
     model._init_distances()
     t1 = time.perf_counter()
@@ -364,7 +364,7 @@ def _run_new_staged(X: np.ndarray) -> tuple[np.ndarray, list[StageResult]]:
     early_stop = False
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", RuntimeWarning)
-        while model._clusters_dist:
+        while len(model._clusters) > 1:
             pre_length = len(model._clusters)
 
             t0 = time.perf_counter()

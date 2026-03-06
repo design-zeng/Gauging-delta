@@ -69,13 +69,13 @@ class GaugingDelta:
 
         # --- Pairwise distances (perception.py L72, L176-220) ---
         self._dist_matrix = np.full((n, n), np.inf)
-        self._clusters_dist: dict[frozenset, dict] = {}
+        self._near_ref = np.empty((n, n), dtype=int)  # _near_ref[i,j] = point in i nearest to j
         self._point_dists: dict[int, list[list]] = {}
         self._init_distances()
 
         # --- Main merge loop (perception.py L75-127) ---
         early_stop = False
-        while self._clusters_dist:
+        while len(self._clusters) > 1:
             pre_length = len(self._clusters)
 
             k_nearest = self._get_sorted_pairs()
@@ -139,7 +139,7 @@ class GaugingDelta:
 
         For singleton clusters, near_dist = center_dist = |X[i] - X[j]|.
         We compute all pairwise distances in one vectorized call via
-        scipy.spatial.distance.cdist, then populate the dict structures.
+        scipy.spatial.distance.cdist, then populate point_dists.
         """
         from scipy.spatial.distance import cdist
 
@@ -150,7 +150,12 @@ class GaugingDelta:
         self._dist_matrix = pairwise.copy()
         np.fill_diagonal(self._dist_matrix, np.inf)
 
-        # Populate clusters_dist and point_dists from the dense matrix
+        # For singletons: nearest point in cluster i to cluster j = point i itself
+        # _near_ref[i, j] = i for all j (vectorized init)
+        idx = np.arange(n)
+        self._near_ref[:] = idx[:, np.newaxis]
+
+        # Populate point_dists from the dense matrix
         keys = list(self._clusters.keys())
         for idx_i in range(n):
             ci = keys[idx_i]
@@ -158,10 +163,6 @@ class GaugingDelta:
             for idx_j in range(idx_i + 1, n):
                 cj = keys[idx_j]
                 d = float(pairwise[idx_i, idx_j])
-
-                # For singletons, near_dist ref points are the points themselves
-                self._clusters_dist[frozenset((ci, cj))] = {ci: ci, cj: cj}
-
                 pd_list.append([cj, d])
                 self._point_dists.setdefault(cj, []).append([ci, d])
 
@@ -241,9 +242,8 @@ class GaugingDelta:
 
         # Step 3: Continuity (perception.py L323-325)
         # Set reference points for continuity
-        pair_key = frozenset((lead_id, child_id))
-        lead.ref_point = self._clusters_dist[pair_key][lead_id]
-        child.ref_point = self._clusters_dist[pair_key][child_id]
+        lead.ref_point = int(self._near_ref[lead_id, child_id])
+        child.ref_point = int(self._near_ref[child_id, lead_id])
 
         cont_threshold = self.config.threshold_continuity / thr.xi_s
         d_ij_norm = d_ij / rho if rho != 0 else d_ij
@@ -279,11 +279,10 @@ class GaugingDelta:
         """
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
-        pair_key = frozenset((lead_id, child_id))
 
         # --- Merge data (perception.py L298-306) ---
-        p1 = self._clusters_dist[pair_key][lead_id]
-        p2 = self._clusters_dist[pair_key][child_id]
+        p1 = int(self._near_ref[lead_id, child_id])
+        p2 = int(self._near_ref[child_id, lead_id])
         lead.merge_edges.append((p1, p2))
         lead.merge_edges.extend(child.merge_edges)
 
@@ -300,9 +299,11 @@ class GaugingDelta:
 
         # --- Update clusters (perception.py L277-291) ---
 
-        # Snapshot child's distances BEFORE deletion (Lance-Williams identity:
-        # near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C)))
+        # Snapshot child's distances and refs BEFORE deletion
+        # Lance-Williams: near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C))
         child_near_row = self._dist_matrix[child_id, :].copy()
+        child_ref_self = self._near_ref[child_id, :].copy()
+        child_ref_other = self._near_ref[:, child_id].copy()
 
         del self._clusters[child_id]
         self._dist_matrix[:, child_id] = np.inf
@@ -310,40 +311,17 @@ class GaugingDelta:
 
         active = np.argwhere(~np.isinf(self._dist_matrix[lead_id, :])).reshape(-1)
 
-        # Snapshot child's reference points for each active cluster
-        child_refs: dict[int, tuple[int, int]] = {}
-        for c in active:
-            c_int = int(c)
-            ck = frozenset((child_id, c_int))
-            if ck in self._clusters_dist:
-                rp = self._clusters_dist[ck]
-                child_refs[c_int] = (rp[child_id], rp[c_int])
+        # Vectorized Lance-Williams update: only update where child was closer
+        # Strict < so lead wins on exact tie (matches legacy argmin first-occurrence)
+        child_dists = child_near_row[active]
+        lead_dists = self._dist_matrix[lead_id, active]
+        mask = child_dists < lead_dists
+        winning = active[mask]
 
-        # Incremental update with Lance-Williams identity
-        clusters_dist = self._clusters_dist
-        dist_matrix = self._dist_matrix
-        for c in active:
-            c_int = int(c)
-            lead_near = dist_matrix[lead_id, c_int]
-            child_near = child_near_row[c_int]
-
-            # Strict < so lead wins on exact tie (matches legacy argmin first-occurrence)
-            if child_near < lead_near:
-                new_near = child_near
-                cr = child_refs.get(c_int)
-                if cr is not None:
-                    new_ref_lead, new_ref_c = cr[0], cr[1]
-                else:
-                    new_ref_lead, new_ref_c = lead_id, c_int
-            else:
-                new_near = lead_near
-                old_rp = clusters_dist[frozenset((lead_id, c_int))]
-                new_ref_lead, new_ref_c = old_rp[lead_id], old_rp[c_int]
-
-            key = frozenset((lead_id, c_int))
-            clusters_dist[key] = {lead_id: new_ref_lead, c_int: new_ref_c}
-            dist_matrix[lead_id, c_int] = new_near
-            dist_matrix[c_int, lead_id] = new_near
+        self._dist_matrix[lead_id, winning] = child_near_row[winning]
+        self._dist_matrix[winning, lead_id] = child_near_row[winning]
+        self._near_ref[lead_id, winning] = child_ref_self[winning]
+        self._near_ref[winning, lead_id] = child_ref_other[winning]
 
         # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
         current_min = self._dist_matrix.min()
@@ -375,11 +353,10 @@ class GaugingDelta:
         """Unconditional merge for post-processing (perception.py L172)."""
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
-        pair_key = frozenset((lead_id, child_id))
 
-        if pair_key in self._clusters_dist:
-            p1 = self._clusters_dist[pair_key][lead_id]
-            p2 = self._clusters_dist[pair_key][child_id]
+        if not np.isinf(self._dist_matrix[lead_id, child_id]):
+            p1 = int(self._near_ref[lead_id, child_id])
+            p2 = int(self._near_ref[child_id, lead_id])
             lead.merge_edges.append((p1, p2))
         lead.merge_edges.extend(child.merge_edges)
 
