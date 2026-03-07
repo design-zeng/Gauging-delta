@@ -15,6 +15,25 @@ from gauging_delta.cluster import Cluster
 from gauging_delta.config import GaugingDeltaConfig
 
 
+def _point_dist(a: np.ndarray, b: np.ndarray, metric: str | callable = "euclidean") -> float:
+    """Distance between two points using the given metric."""
+    if metric == "euclidean":
+        diff = a - b
+        return float(math.sqrt(float(diff @ diff)))
+    from scipy.spatial.distance import cdist
+
+    return float(cdist(a.reshape(1, -1), b.reshape(1, -1), metric=metric)[0, 0])
+
+
+def _row_dists(X: np.ndarray, y: np.ndarray, metric: str | callable = "euclidean") -> np.ndarray:
+    """Distances from each row of X to point y."""
+    if metric == "euclidean":
+        return np.linalg.norm(X - y, axis=1)
+    from scipy.spatial.distance import cdist
+
+    return cdist(X, y.reshape(1, -1), metric=metric).ravel()
+
+
 class ThresholdResult(NamedTuple):
     T_i: float
     T_j: float
@@ -190,6 +209,7 @@ def compute_adaptive_threshold_lite(
     center_ids: list[int],  # maps position → cluster ID
     center_id_to_pos: dict[int, int],  # maps cluster ID → position
     cfg: GaugingDeltaConfig,
+    metric: str | callable = "euclidean",
 ) -> ThresholdResult:
     """Lite-mode adaptive threshold using brute-force centroid scans.
 
@@ -214,7 +234,7 @@ def compute_adaptive_threshold_lite(
         k_actual = min(k, K - 1)
 
         # Brute-force KNN for lead
-        dists1 = np.linalg.norm(centers - lead.center, axis=1)
+        dists1 = _row_dists(centers, lead.center, metric)
         pos1 = center_id_to_pos[c1_id]
         dists1[pos1] = np.inf  # exclude self
         if k_actual > 0:
@@ -225,7 +245,7 @@ def compute_adaptive_threshold_lite(
             idx1 = np.array([], dtype=int)
 
         # Brute-force KNN for child
-        dists2 = np.linalg.norm(centers - child.center, axis=1)
+        dists2 = _row_dists(centers, child.center, metric)
         pos2 = center_id_to_pos[c2_id]
         dists2[pos2] = np.inf  # exclude self
         if k_actual > 0:
@@ -245,7 +265,7 @@ def compute_adaptive_threshold_lite(
 
     # --- Step 2: vision scale / beta ---
     vision_scale = _compute_vision_scale_lite(
-        c1_id, c2_id, d_ij, idx1_ids, idx2_ids, all_clusters, cfg
+        c1_id, c2_id, d_ij, idx1_ids, idx2_ids, all_clusters, cfg, metric
     )
 
     # --- Step 3: T_stat per cluster ---
@@ -265,12 +285,12 @@ def _compute_force_lite(
     c1_id: int,
     c2_id: int,
     all_clusters: dict[int, Cluster],
+    metric: str | callable = "euclidean",
 ) -> float:
     """Gravitational force using centroid distance only (lite mode)."""
     if c1_id not in all_clusters or c2_id not in all_clusters:
         return 0.0
-    diff = all_clusters[c1_id].center - all_clusters[c2_id].center
-    d = math.sqrt(float(diff @ diff))
+    d = _point_dist(all_clusters[c1_id].center, all_clusters[c2_id].center, metric)
     if d == 0:
         # Legacy behavior: numpy division produces inf
         return float(
@@ -289,9 +309,10 @@ def _compute_vision_scale_lite(
     idx2_ids: np.ndarray,
     all_clusters: dict[int, Cluster],
     cfg: GaugingDeltaConfig,
+    metric: str | callable = "euclidean",
 ) -> float:
     """Force-weighted environmental scaling using direct centroid distances (lite mode)."""
-    base_force = _compute_force_lite(c1_id, c2_id, all_clusters)
+    base_force = _compute_force_lite(c1_id, c2_id, all_clusters, metric)
     if base_force == 0:
         return 1.0
 
@@ -300,8 +321,8 @@ def _compute_vision_scale_lite(
     for c_int in idx1_ids:
         c_int = int(c_int)
         if c_int in set2:
-            f1 = _compute_force_lite(c_int, c1_id, all_clusters)
-            f2 = _compute_force_lite(c_int, c2_id, all_clusters)
+            f1 = _compute_force_lite(c_int, c1_id, all_clusters, metric)
+            f2 = _compute_force_lite(c_int, c2_id, all_clusters, metric)
             forces.append((math.sqrt(f1 * f2) / base_force, c_int))
 
     if not forces:
@@ -312,11 +333,9 @@ def _compute_vision_scale_lite(
     cont_clusters: list[tuple[float, float]] = []
     total_affect = 0.0
     for weight, cid in forces:
-        diff_c1 = all_clusters[cid].center - all_clusters[c1_id].center
-        d_c1 = math.sqrt(float(diff_c1 @ diff_c1))
+        d_c1 = _point_dist(all_clusters[cid].center, all_clusters[c1_id].center, metric)
         if cid != c2_id:
-            diff_c2 = all_clusters[cid].center - all_clusters[c2_id].center
-            d_c2 = math.sqrt(float(diff_c2 @ diff_c2))
+            d_c2 = _point_dist(all_clusters[cid].center, all_clusters[c2_id].center, metric)
         else:
             d_c2 = d_c1
         cont_clusters.append((weight, (d_c2 + d_c1) / 2))

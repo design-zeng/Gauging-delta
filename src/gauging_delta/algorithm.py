@@ -9,6 +9,7 @@ from __future__ import annotations
 import math
 
 import numpy as np
+from sklearn.base import BaseEstimator, ClusterMixin
 
 from gauging_delta._types import ContinuityMetric, LinkageMetric, ProximityMetric
 from gauging_delta.cluster import Cluster
@@ -19,7 +20,7 @@ from gauging_delta.proximity import DefaultProximity
 from gauging_delta.threshold import compute_adaptive_threshold
 
 
-class GaugingDelta:
+class GaugingDelta(ClusterMixin, BaseEstimator):
     """Gauging-delta clustering with sklearn-compatible API.
 
     Parameters
@@ -32,14 +33,31 @@ class GaugingDelta:
         - ``'full'``: Single-linkage distances with angle-based continuity
           analysis.  Highest quality; O(N²) memory for 4 dense arrays.
         - ``'lite'``: Centroid-linkage distances, no continuity gate.
-          ~4× lower memory (1 dense array); suitable for larger datasets.
+          O(N·D) memory; suitable for large datasets.
+    metric : str or callable, default='euclidean'
+        Distance metric.  Accepts any metric supported by
+        :func:`scipy.spatial.distance.cdist` (e.g. ``'euclidean'``,
+        ``'cosine'``, ``'cityblock'``), a callable ``f(u, v) -> float``,
+        or ``'precomputed'``.
 
-        When ``mode='lite'``, the *continuity* and *linkage* parameters
-        are ignored.
+        When ``'precomputed'``, *X* passed to :meth:`fit` must be a
+        distance matrix — square *(N, N)*, condensed 1-D (from
+        :func:`~scipy.spatial.distance.pdist`), or a DataFrame.
+        Requires ``mode='full'``; continuity is automatically disabled.
+
+        Non-euclidean metrics must satisfy the triangle inequality
+        (validated at ``fit()`` time).
     config : GaugingDeltaConfig or None
-        All magic numbers.  Defaults are the paper's values.
-    proximity, continuity, linkage : Protocol-compatible objects or None
-        Swappable algorithm components (used in ``mode='full'`` only).
+        Algorithm constants.
+    proximity : ProximityMetric or None
+        Custom proximity metric.  ``None`` uses the default.
+    continuity : ContinuityMetric, False, or None
+        Continuity gate.  ``None`` uses the mode default (on for full,
+        off for lite).  ``False`` explicitly disables the gate.  A
+        :class:`ContinuityMetric` instance provides a custom implementation.
+    linkage : LinkageMetric or None
+        Custom linkage metric.  Full mode uses single-linkage by default;
+        lite mode uses centroid-linkage.
     preserve_labels : bool
         If *True*, ``labels_`` keeps the internal cluster IDs instead
         of renumbering to ``0 … n_clusters_-1``.
@@ -50,33 +68,189 @@ class GaugingDelta:
         *,
         n_clusters: int | None = None,
         mode: str = "full",
+        metric: str | callable = "euclidean",
         config: GaugingDeltaConfig | None = None,
         proximity: ProximityMetric | None = None,
-        continuity: ContinuityMetric | None = None,
+        continuity: ContinuityMetric | None | bool = None,
         linkage: LinkageMetric | None = None,
         preserve_labels: bool = False,
     ) -> None:
         self.n_clusters = n_clusters
         self.mode = mode
-        self.config = config or GaugingDeltaConfig()
-        self.proximity = proximity or DefaultProximity()
-        if mode == "full":
-            self.continuity = continuity or DefaultContinuity(self.config)
-            self.linkage = linkage or DefaultLinkage()
-        else:
-            self.continuity = continuity  # type: ignore[assignment]
-            self.linkage = linkage  # type: ignore[assignment]
+        self.metric = metric
+        self.config = config
+        self.proximity = proximity
+        self.continuity = continuity
+        self.linkage = linkage
         self.preserve_labels = preserve_labels
+
+    def __sklearn_tags__(self):
+        tags = super().__sklearn_tags__()
+        tags.input_tags.pairwise = self.metric == "precomputed"
+        return tags
+
+    # ----- Distance helpers --------------------------------------------------
+
+    def _cdist(self, X: np.ndarray, Y: np.ndarray) -> np.ndarray:
+        """Pairwise distances between rows of *X* and *Y*."""
+        from scipy.spatial.distance import cdist
+
+        return cdist(X, Y, metric=self.metric)
+
+    def _row_dists(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
+        """Distances from each row of *X* to single point *y*. Returns (len(X),)."""
+        if self.metric == "euclidean" or self._precomputed:
+            return np.linalg.norm(X - y, axis=1)
+        from scipy.spatial.distance import cdist
+
+        return cdist(X, y.reshape(1, -1), metric=self.metric).ravel()
+
+    def _point_dist(self, a: np.ndarray, b: np.ndarray) -> float:
+        """Distance between two single points."""
+        if self.metric == "euclidean" or self._precomputed:
+            diff = a - b
+            return float(math.sqrt(float(diff @ diff)))
+        from scipy.spatial.distance import cdist
+
+        return float(cdist(a.reshape(1, -1), b.reshape(1, -1), metric=self.metric)[0, 0])
+
+    # ----- Metric validation ------------------------------------------------
+
+    def _validate_metric(self) -> None:
+        """Spot-check triangle inequality on a sample of point triples."""
+        n = len(self._X)
+        rng = np.random.RandomState(0)
+        sample = rng.choice(n, size=min(n, 9), replace=False)
+        for i in range(0, len(sample) - 2, 3):
+            a, b, c = int(sample[i]), int(sample[i + 1]), int(sample[i + 2])
+            d_ab = self._point_dist(self._X[a], self._X[b])
+            d_bc = self._point_dist(self._X[b], self._X[c])
+            d_ac = self._point_dist(self._X[a], self._X[c])
+            # Check all three sides as the "long" side
+            for d_long, d_sum in [
+                (d_ab, d_ac + d_bc),
+                (d_ac, d_ab + d_bc),
+                (d_bc, d_ab + d_ac),
+            ]:
+                if d_long > d_sum + 1e-10:
+                    raise ValueError(
+                        f"metric violates triangle inequality on points "
+                        f"x[{a}], x[{b}], x[{c}]. "
+                        f"Gauging-delta requires a valid distance metric."
+                    )
+
+    # ----- Precomputed distance matrix validation ---------------------------
+
+    @staticmethod
+    def _validate_precomputed(X: np.ndarray) -> np.ndarray:
+        """Validate and normalise a precomputed distance matrix.
+
+        Accepts:
+        - Square (N, N) symmetric matrix with zero diagonal.
+        - Condensed 1-D vector of length N*(N-1)/2 (scipy ``pdist`` output).
+
+        Returns the square (N, N) matrix.
+        """
+        if X.ndim == 1:
+            from scipy.spatial.distance import squareform
+
+            try:
+                X = squareform(X)
+            except ValueError:
+                raise ValueError(
+                    "1-D input with metric='precomputed' must be a condensed "
+                    "distance vector of length N*(N-1)/2 (from scipy.spatial."
+                    "distance.pdist).  Pass a square (N, N) matrix instead."
+                ) from None
+        if X.ndim != 2 or X.shape[0] != X.shape[1]:
+            raise ValueError(
+                f"metric='precomputed' requires a square distance matrix or "
+                f"condensed 1-D vector, got shape {X.shape}"
+            )
+        if np.any(X < -1e-10):
+            raise ValueError("Distance matrix contains negative values.")
+        if np.any(np.abs(np.diag(X)) > 1e-10):
+            raise ValueError("Distance matrix diagonal must be zero.")
+        if not np.allclose(X, X.T, atol=1e-10):
+            raise ValueError("Distance matrix must be symmetric.")
+        return X
 
     # ----- sklearn-compatible interface ------------------------------------
 
-    def fit(self, X: np.ndarray) -> GaugingDelta:
-        """Run Gauging-delta on data matrix *X* (n_samples, n_features)."""
+    def fit(self, X, y=None):
+        """Run Gauging-delta on data matrix *X*.
+
+        Parameters
+        ----------
+        X : array-like
+            Feature matrix of shape *(n_samples, n_features)*, or a
+            precomputed distance matrix when ``metric='precomputed'``.
+            Distance matrices may be square *(n, n)*, condensed 1-D
+            (length *n*(n-1)/2*, as from :func:`scipy.spatial.distance.pdist`),
+            or a pandas DataFrame.
+        y : ignored
+            Not used, present for sklearn API consistency.
+        """
         if self.mode not in ("full", "lite"):
             raise ValueError(f"mode must be 'full' or 'lite', got {self.mode!r}")
 
-        self._X = np.asarray(X, dtype=float)
+        # --- Resolve defaults (raw params stored in __init__ for get_params) ---
+        self._precomputed = self.metric == "precomputed"
+        self._cfg = self.config or GaugingDeltaConfig()
+        self._prox = self.proximity or DefaultProximity()
+
+        # Precomputed constraints
+        if self._precomputed:
+            if self.mode == "lite":
+                raise ValueError(
+                    "metric='precomputed' requires mode='full' "
+                    "(lite mode needs recomputable centroid distances)"
+                )
+            if self.continuity is not None and self.continuity is not False:
+                raise ValueError(
+                    "continuity requires feature coordinates and cannot be "
+                    "used with metric='precomputed'"
+                )
+
+        # Continuity: None → mode default, False → disabled, instance → custom
+        if self._precomputed or self.continuity is False:
+            self._cont: ContinuityMetric | None = None
+        elif self.continuity is None:
+            self._cont = DefaultContinuity(self._cfg) if self.mode == "full" else None
+        else:
+            self._cont = self.continuity  # type: ignore[assignment]
+
+        # Linkage resolution
+        if self.linkage is None:
+            self._lnk: LinkageMetric | None = DefaultLinkage() if self.mode == "full" else None
+        else:
+            self._lnk = self.linkage
+
+        # --- Input validation ---
+        if self._precomputed:
+            X_arr = np.asarray(X, dtype=float)
+            self._X = self._validate_precomputed(X_arr)
+            self.n_features_in_ = self._X.shape[0]
+        else:
+            from sklearn.utils.validation import validate_data
+
+            self._X = validate_data(self, X, accept_sparse=False, dtype="numeric", reset=True)
+
         n = len(self._X)
+
+        # Trivial: 0 or 1 sample
+        if n <= 1:
+            self._clusters = {
+                i: Cluster(label=i, point_indices=[i], center=self._X[i].copy())
+                for i in range(n)
+            }
+            self._merge_log = []
+            self._build_labels()
+            return self
+
+        # Validate metric satisfies triangle inequality
+        if not self._precomputed and self.metric != "euclidean" and n >= 3:
+            self._validate_metric()
 
         # --- Initialise singleton clusters (perception.py L56-69) ---
         self._clusters: dict[int, Cluster] = {
@@ -96,11 +270,14 @@ class GaugingDelta:
 
         # Precompute rho rejection bound for lite mode (max possible threshold)
         if self.mode == "lite":
-            cfg = self.config
+            cfg = self._cfg
             self._rho_reject_bound = (
                 (cfg.vision_scale_coeff / 2 + cfg.vision_scale_offset)
                 * max(cfg.t_stat_numerator / 2 + cfg.t_stat_offset, cfg.t_stat_fallback)
             )
+
+        # --- Merge log for hierarchical outputs ---
+        self._merge_log: list[tuple[int, int, float]] = []
 
         # --- Main merge loop (perception.py L75-127) ---
         early_stop = False
@@ -133,10 +310,12 @@ class GaugingDelta:
                     _c = self._get_nearest_cluster(last_merged)
                     if _c is not None:
                         if self.mode == "lite":
-                            _diff = self._clusters[last_merged].center - self._clusters[_c].center
-                            d_lm = math.sqrt(float(_diff @ _diff))
-                            _diff = self._clusters[c1].center - self._clusters[c2].center
-                            d_pair = math.sqrt(float(_diff @ _diff))
+                            d_lm = self._point_dist(
+                                self._clusters[last_merged].center, self._clusters[_c].center
+                            )
+                            d_pair = self._point_dist(
+                                self._clusters[c1].center, self._clusters[c2].center
+                            )
                             closer = d_lm < d_pair
                         else:
                             closer = self._dist_matrix[last_merged, _c] < self._dist_matrix[c1, c2]
@@ -169,10 +348,6 @@ class GaugingDelta:
         self._build_labels()
         return self
 
-    def fit_predict(self, X: np.ndarray) -> np.ndarray:
-        """Fit and return cluster labels."""
-        return self.fit(X).labels_
-
     # ----- Distance initialisation -----------------------------------------
 
     def _init_distances(self) -> None:
@@ -184,12 +359,14 @@ class GaugingDelta:
 
     def _init_distances_full(self) -> None:
         """Full mode: single-linkage distances + sorted neighbor arrays."""
-        from scipy.spatial.distance import cdist
-
         n = len(self._X)
 
-        # Vectorized pairwise distances — O(N²·D) in one C call
-        pairwise = cdist(self._X, self._X)  # (N, N)
+        # Pairwise distances: precomputed → use directly, else compute via cdist
+        if self._precomputed:
+            pairwise = self._X  # already a distance matrix
+        else:
+            pairwise = self._cdist(self._X, self._X)  # (N, N)
+
         self._dist_matrix = pairwise.copy()
         np.fill_diagonal(self._dist_matrix, np.inf)
 
@@ -198,17 +375,18 @@ class GaugingDelta:
         idx = np.arange(n)
         self._near_ref[:] = idx[:, np.newaxis]
 
-        # Build sorted neighbor arrays from pairwise matrix (replaces _point_dists dict)
-        # _pd_indices[i] = neighbor indices sorted by distance from point i
-        # _pd_dists[i] = corresponding sorted distances
-        # kind="stable" matches legacy Python list.sort tie-breaking (lower index first)
-        # Mask self-distances to inf so self never appears in sorted neighbors
-        # (simple [:, 1:] fails for duplicate points where pairwise[i,j]=0=pairwise[i,i])
-        pw_no_self = pairwise.copy()
-        np.fill_diagonal(pw_no_self, np.inf)
-        full_order = np.argsort(pw_no_self, axis=1, kind="stable")[:, : n - 1]
-        self._pd_indices = full_order
-        self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
+        # Sorted neighbor arrays: only needed when continuity is enabled
+        if self._cont is not None:
+            # _pd_indices[i] = neighbor indices sorted by distance from point i
+            # _pd_dists[i] = corresponding sorted distances
+            # kind="stable" matches legacy Python list.sort tie-breaking (lower index first)
+            # Mask self-distances to inf so self never appears in sorted neighbors
+            # (simple [:, 1:] fails for duplicate points where pairwise[i,j]=0=pairwise[i,i])
+            pw_no_self = pairwise.copy()
+            np.fill_diagonal(pw_no_self, np.inf)
+            full_order = np.argsort(pw_no_self, axis=1, kind="stable")[:, : n - 1]
+            self._pd_indices = full_order
+            self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
 
         # MIN_BTN_CLUSTER_DIST (perception.py L213)
         # Row-wise minimum tracking: per-row argmin column + value arrays
@@ -216,12 +394,10 @@ class GaugingDelta:
         self._row_mins = self._dist_matrix[np.arange(n), self._row_argmins].copy()
         upper = pairwise[np.triu_indices(n, k=1)]
         upper.sort()
-        self._fallback_dist = float(upper[int(len(upper) * self.config.min_dist_percentile)])
+        self._fallback_dist = float(upper[int(len(upper) * self._cfg.min_dist_percentile)])
 
     def _init_distances_lite(self) -> None:
         """Lite mode: build KDTree over initial singleton centroids."""
-        from scipy.spatial import cKDTree
-
         n = len(self._X)
         D = self._X.shape[1] if self._X.ndim > 1 else 1
 
@@ -239,13 +415,22 @@ class GaugingDelta:
         self._lite_centers = self._X.copy()  # singletons → centers = data points
         self._lite_id_to_pos = {i: i for i in range(n)}
         self._lite_K = n
-        self._lite_tree = cKDTree(self._lite_centers)
 
-        # Compute fallback_dist from nearest-neighbor distances
-        nn_dists, _ = self._lite_tree.query(self._lite_centers, k=2)
-        nn_sorted = np.sort(nn_dists[:, 1])
+        # KDTree for euclidean; brute-force cdist otherwise
+        if self.metric == "euclidean":
+            from scipy.spatial import cKDTree
+
+            self._lite_tree = cKDTree(self._lite_centers)
+            nn_dists, _ = self._lite_tree.query(self._lite_centers, k=2)
+            nn_sorted = np.sort(nn_dists[:, 1])
+        else:
+            self._lite_tree = None
+            pw = self._cdist(self._lite_centers, self._lite_centers)
+            np.fill_diagonal(pw, np.inf)
+            nn_sorted = np.sort(np.min(pw, axis=1))
+
         self._fallback_dist = float(
-            nn_sorted[max(0, int(len(nn_sorted) * self.config.min_dist_percentile))]
+            nn_sorted[max(0, int(len(nn_sorted) * self._cfg.min_dist_percentile))]
         )
 
     # ----- Sorted pairs ----------------------------------------------------
@@ -268,21 +453,32 @@ class GaugingDelta:
         return ind[:, order]
 
     def _get_sorted_pairs_lite(self) -> np.ndarray:
-        """Sorted candidate pairs via KDTree (rebuilt once per outer loop)."""
-        from scipy.spatial import cKDTree
-
+        """Sorted candidate pairs (KDTree for euclidean, brute-force otherwise)."""
         K = self._lite_K
         if K <= 1:
             return np.empty((2, 0), dtype=int)
 
-        # Rebuild KDTree from active portion of centers array
         centers = self._lite_centers[:K]
-        self._lite_tree = cKDTree(centers)
 
         # Adaptive k: match original's coverage
         entries_per_cluster = min(K - 1, max(1, len(self._X) // K))
         k_query = entries_per_cluster + 1  # +1 for self
-        dists_arr, idxs_arr = self._lite_tree.query(centers, k=min(k_query, K))
+
+        if self.metric == "euclidean":
+            from scipy.spatial import cKDTree
+
+            self._lite_tree = cKDTree(centers)
+            dists_arr, idxs_arr = self._lite_tree.query(centers, k=min(k_query, K))
+        else:
+            self._lite_tree = None
+            pw = self._cdist(centers, centers)
+            np.fill_diagonal(pw, np.inf)
+            k_nn = min(k_query, K)
+            idxs_arr = np.argpartition(pw, k_nn - 1, axis=1)[:, :k_nn]
+            dists_arr = np.take_along_axis(pw, idxs_arr, axis=1)
+            order = np.argsort(dists_arr, axis=1)
+            idxs_arr = np.take_along_axis(idxs_arr, order, axis=1)
+            dists_arr = np.take_along_axis(dists_arr, order, axis=1)
 
         # Ensure 2D
         if dists_arr.ndim == 1:
@@ -335,7 +531,7 @@ class GaugingDelta:
             return None
         center = self._clusters[cid].center
         pos = self._lite_id_to_pos[cid]
-        dists = np.linalg.norm(self._lite_centers[:K] - center, axis=1)
+        dists = self._row_dists(self._lite_centers[:K], center)
         dists[pos] = np.inf
         nearest_pos = int(np.argmin(dists))
         return self._lite_ids[nearest_pos]
@@ -355,7 +551,7 @@ class GaugingDelta:
         d_ij: float = float(self._dist_matrix[c1, c2])
 
         # Step 1: Proximity (perception.py L310)
-        prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
+        prox = self._prox.compute(C_i, C_j, d_ij, self._fallback_dist)
         rho = prox.rho
         lead_id, child_id = prox.lead_id, prox.child_id
         lead = self._clusters[lead_id]
@@ -369,7 +565,7 @@ class GaugingDelta:
             rho,
             self._clusters,
             self._dist_matrix,
-            self.config,
+            self._cfg,
         )
 
         # Gate: proximity > threshold → reject (perception.py L318)
@@ -377,33 +573,35 @@ class GaugingDelta:
             return None
 
         # Step 3: Continuity (perception.py L323-325)
-        # Set reference points for continuity
-        lead.ref_point = int(self._near_ref[lead_id, child_id])
-        child.ref_point = int(self._near_ref[child_id, lead_id])
+        if self._cont is not None:
+            lead.ref_point = int(self._near_ref[lead_id, child_id])
+            child.ref_point = int(self._near_ref[child_id, lead_id])
 
-        cont_threshold = self.config.threshold_continuity / thr.xi_s
-        d_ij_norm = d_ij / rho if rho != 0 else d_ij
-        smoothness = self.continuity.compute(
-            lead,
-            child,
-            cont_threshold,
-            d_ij_norm,
-            thr.adp_prox,
-            self._X,
-            (self._pd_indices, self._pd_dists),
-        )
+            cont_threshold = self._cfg.threshold_continuity / thr.xi_s
+            d_ij_norm = d_ij / rho if rho != 0 else d_ij
+            smoothness = self._cont.compute(
+                lead,
+                child,
+                cont_threshold,
+                d_ij_norm,
+                thr.adp_prox,
+                self._X,
+                (self._pd_indices, self._pd_dists),
+            )
 
-        # Gate: smoothness > threshold → accept merge (perception.py L328)
-        if smoothness > cont_threshold:
-            # Record history BEFORE merge (perception.py L332-336)
+            # Gate: smoothness > threshold → accept merge (perception.py L328)
+            if smoothness <= cont_threshold:
+                return None
+
             lead.density_history.append(smoothness)
-            lead.merge_history.append(d_ij)
-            lead.merging_dists.append(d_ij)
 
-            self._do_merge(lead_id, child_id)
-            return lead_id
+        # Record and merge
+        lead.merge_history.append(d_ij)
+        lead.merging_dists.append(d_ij)
 
-        return None
+        self._merge_log.append((lead_id, child_id, d_ij))
+        self._do_merge(lead_id, child_id)
+        return lead_id
 
     def _try_merge_lite(self, c1: int, c2: int) -> int | None:
         """Lite mode: proximity → threshold → merge (no continuity)."""
@@ -411,11 +609,10 @@ class GaugingDelta:
 
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
-        _diff = C_i.center - C_j.center
-        d_ij = math.sqrt(float(_diff @ _diff))
+        d_ij = self._point_dist(C_i.center, C_j.center)
 
         # Step 1: Proximity
-        prox = self.proximity.compute(C_i, C_j, d_ij, self._fallback_dist)
+        prox = self._prox.compute(C_i, C_j, d_ij, self._fallback_dist)
         rho = prox.rho
 
         # Short-circuit: rho exceeds maximum possible threshold → skip threshold
@@ -435,7 +632,8 @@ class GaugingDelta:
             self._lite_centers[: self._lite_K],
             self._lite_ids,
             self._lite_id_to_pos,
-            self.config,
+            self._cfg,
+            metric=self.metric,
         )
 
         # Gate: proximity > threshold → reject
@@ -446,6 +644,7 @@ class GaugingDelta:
         lead.merge_history.append(d_ij)
         lead.merging_dists.append(d_ij)
 
+        self._merge_log.append((lead_id, child_id, d_ij))
         self._do_merge(lead_id, child_id)
         return lead_id
 
@@ -472,7 +671,7 @@ class GaugingDelta:
         lead.point_indices.extend(child.point_indices)
         lead.center = np.mean(self._X[lead.point_indices], axis=0)
 
-        dist_data = np.linalg.norm(self._X[lead.point_indices] - lead.center, axis=1)
+        dist_data = self._row_dists(self._X[lead.point_indices], lead.center)
         lead.mu_dist = float(np.mean(dist_data))
         lead.sigma_dist = float(np.std(dist_data))
         lead.sigma_history.append(lead.sigma_dist)
@@ -555,7 +754,7 @@ class GaugingDelta:
         lead.point_indices.extend(child.point_indices)
         lead.center = np.mean(self._X[lead.point_indices], axis=0)
 
-        dist_data = np.linalg.norm(self._X[lead.point_indices] - lead.center, axis=1)
+        dist_data = self._row_dists(self._X[lead.point_indices], lead.center)
         lead.mu_dist = float(np.mean(dist_data))
         lead.sigma_dist = float(np.std(dist_data))
         lead.sigma_history.append(lead.sigma_dist)
@@ -585,7 +784,7 @@ class GaugingDelta:
         # Update fallback_dist from lead's nearest neighbor (O(K·D))
         K = self._lite_K
         if K >= 2:
-            dists = np.linalg.norm(self._lite_centers[:K] - lead.center, axis=1)
+            dists = self._row_dists(self._lite_centers[:K], lead.center)
             dists[lead_pos] = np.inf
             current_min = float(np.min(dists))
             if not np.isinf(current_min):
@@ -610,10 +809,10 @@ class GaugingDelta:
         for cid, cluster in remaining:
             if self.mode == "lite":
                 c_center = cluster.center
-                dists = []
-                for tid in top_k_ids:
-                    _d = self._clusters[tid].center - c_center
-                    dists.append((tid, math.sqrt(float(_d @ _d))))
+                dists = [
+                    (tid, self._point_dist(self._clusters[tid].center, c_center))
+                    for tid in top_k_ids
+                ]
             else:
                 dists = [(tid, self._dist_matrix[tid, cid]) for tid in top_k_ids]
             nearest = min(dists, key=lambda x: x[1])
@@ -627,6 +826,15 @@ class GaugingDelta:
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
+        # Record merge distance for hierarchical outputs
+        if self.mode == "full":
+            d = float(self._dist_matrix[lead_id, child_id])
+        else:
+            d = self._point_dist(lead.center, child.center)
+        if np.isinf(d):
+            d = self._point_dist(lead.center, child.center)
+        self._merge_log.append((lead_id, child_id, d))
+
         if self.mode == "full" and not np.isinf(self._dist_matrix[lead_id, child_id]):
             p1 = int(self._near_ref[lead_id, child_id])
             p2 = int(self._near_ref[child_id, lead_id])
@@ -636,7 +844,7 @@ class GaugingDelta:
         lead.point_indices.extend(child.point_indices)
         lead.center = np.mean(self._X[lead.point_indices], axis=0)
 
-        dist_data = np.linalg.norm(self._X[lead.point_indices] - lead.center, axis=1)
+        dist_data = self._row_dists(self._X[lead.point_indices], lead.center)
         lead.mu_dist = float(np.mean(dist_data))
         lead.sigma_dist = float(np.std(dist_data))
         lead.sigma_history.append(lead.sigma_dist)
@@ -665,3 +873,56 @@ class GaugingDelta:
 
         self.labels_ = labels
         self.n_clusters_ = len(self._clusters)
+
+        if not self._precomputed:
+            ordered = sorted(self._clusters.items())
+            self.cluster_centers_ = np.array([c.center for _, c in ordered])
+
+        # Build hierarchical outputs from merge log
+        n = len(self._X)
+        self.n_leaves_ = n
+
+        id_map = dict(enumerate(range(n)))
+        children_list: list[list[int]] = []
+        distances_list: list[float] = []
+        for step, (lead_id, child_id, d_ij) in enumerate(self._merge_log):
+            new_id = n + step
+            children_list.append([id_map[lead_id], id_map[child_id]])
+            distances_list.append(d_ij)
+            id_map[lead_id] = new_id
+
+        # Complete the hierarchy for scipy compatibility (needs n-1 rows).
+        # If the algorithm stopped at k > 1 clusters, merge remaining clusters
+        # at increasing distances above the last recorded merge.
+        remaining_ids = sorted(self._clusters.keys())
+        if len(remaining_ids) > 1:
+            pad_dist = max(distances_list) * 1.5 if distances_list else 1.0
+            while len(remaining_ids) > 1:
+                a, b = remaining_ids[0], remaining_ids[1]
+                step = len(children_list)
+                new_id = n + step
+                children_list.append([id_map[a], id_map[b]])
+                distances_list.append(pad_dist)
+                id_map[a] = new_id
+                remaining_ids = [a] + remaining_ids[2:]
+                pad_dist *= 1.5
+
+        self.children_ = np.array(children_list, dtype=int).reshape(-1, 2)
+        self.distances_ = np.array(distances_list)
+
+    @property
+    def linkage_matrix_(self) -> np.ndarray:
+        """Scipy-compatible (n_merges, 4) linkage matrix Z.
+
+        Rows: ``[child_1, child_2, distance, sample_count]``.
+        Compatible with :func:`scipy.cluster.hierarchy.dendrogram`.
+        """
+        from sklearn.utils.validation import check_is_fitted
+
+        check_is_fitted(self)
+        sizes: list[int] = []
+        for (c1, c2), d in zip(self.children_, self.distances_):
+            s1 = 1 if c1 < self.n_leaves_ else sizes[c1 - self.n_leaves_]
+            s2 = 1 if c2 < self.n_leaves_ else sizes[c2 - self.n_leaves_]
+            sizes.append(s1 + s2)
+        return np.column_stack([self.children_, self.distances_, sizes])
