@@ -355,7 +355,7 @@ class TestPrecomputed:
 
     def test_square_matrix(self) -> None:
         """Square (N, N) distance matrix should work."""
-        from scipy.spatial.distance import squareform, pdist
+        from scipy.spatial.distance import pdist, squareform
 
         X = self._blobs_X()
         D = squareform(pdist(X))
@@ -375,7 +375,7 @@ class TestPrecomputed:
 
     def test_square_and_condensed_agree(self) -> None:
         """Square and condensed input should produce identical labels."""
-        from scipy.spatial.distance import squareform, pdist
+        from scipy.spatial.distance import pdist, squareform
 
         X = self._blobs_X()
         D_sq = squareform(pdist(X))
@@ -387,7 +387,7 @@ class TestPrecomputed:
     def test_consistent_with_euclidean(self) -> None:
         """Precomputed euclidean matrix should produce same result as metric='euclidean'
         with continuity disabled (precomputed forces continuity off)."""
-        from scipy.spatial.distance import squareform, pdist
+        from scipy.spatial.distance import pdist, squareform
 
         X = self._blobs_X()
         D = squareform(pdist(X))
@@ -397,7 +397,7 @@ class TestPrecomputed:
 
     def test_n_clusters_target(self) -> None:
         """n_clusters should work with precomputed."""
-        from scipy.spatial.distance import squareform, pdist
+        from scipy.spatial.distance import pdist, squareform
 
         X = self._blobs_X()
         D = squareform(pdist(X))
@@ -407,7 +407,7 @@ class TestPrecomputed:
     def test_dataframe_input(self) -> None:
         """Pandas DataFrame distance matrix should work."""
         pd = pytest.importorskip("pandas")
-        from scipy.spatial.distance import squareform, pdist
+        from scipy.spatial.distance import pdist, squareform
 
         X = self._blobs_X()
         D = squareform(pdist(X))
@@ -535,13 +535,13 @@ class TestInputValidation:
     def test_nan_rejected(self) -> None:
         X_nan = self.X.copy()
         X_nan[0, 0] = np.nan
-        with pytest.raises(ValueError, match="Input .* contains NaN"):
+        with pytest.raises(ValueError, match=r"Input .* contains NaN"):
             GaugingDelta().fit(X_nan)
 
     def test_inf_rejected(self) -> None:
         X_inf = self.X.copy()
         X_inf[0, 0] = np.inf
-        with pytest.raises(ValueError, match="Input .* contains (infinity|NaN)"):
+        with pytest.raises(ValueError, match=r"Input .* contains (infinity|NaN)"):
             GaugingDelta().fit(X_inf)
 
     def test_n_features_in(self) -> None:

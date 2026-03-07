@@ -5,7 +5,7 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![IEEE TPAMI 2025](https://img.shields.io/badge/IEEE_TPAMI-2025-blue.svg)](https://doi.org/10.1109/TPAMI.2025.3545573)
-[![tests](https://img.shields.io/badge/tests-124_passed-brightgreen.svg)](#)
+[![tests](https://img.shields.io/badge/tests-125_passed-brightgreen.svg)](#)
 [![sklearn](https://img.shields.io/badge/API-sklearn--compatible-F7931E?logo=scikit-learn&logoColor=white)](#api-reference)
 
 </div>
@@ -246,6 +246,8 @@ These accept Protocol-compatible objects. See `src/gauging_delta/_types.py` for 
 | `linkage_matrix_` | `np.ndarray` | Scipy-compatible *(n_samples-1, 4)* linkage matrix for dendrograms. |
 
 ### Dendrogram
+
+> Requires matplotlib: `pip install gauging-delta[bench]`
 
 ```python
 from scipy.cluster.hierarchy import dendrogram

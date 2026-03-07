@@ -209,7 +209,6 @@ name = "gauging-delta"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "matplotlib" },
     { name = "numpy" },
     { name = "scikit-learn" },
     { name = "scipy" },
@@ -217,6 +216,7 @@ dependencies = [
 
 [package.optional-dependencies]
 all = [
+    { name = "matplotlib" },
     { name = "memray" },
     { name = "mypy" },
     { name = "pre-commit" },
@@ -228,6 +228,7 @@ all = [
     { name = "scienceplots" },
 ]
 bench = [
+    { name = "matplotlib" },
     { name = "memray" },
     { name = "psutil" },
     { name = "scienceplots" },
@@ -244,7 +245,7 @@ dev = [
 [package.metadata]
 requires-dist = [
     { name = "gauging-delta", extras = ["dev", "bench"], marker = "extra == 'all'" },
-    { name = "matplotlib", specifier = ">=3.9.4" },
+    { name = "matplotlib", marker = "extra == 'bench'", specifier = ">=3.9.4" },
     { name = "memray", marker = "extra == 'bench'", specifier = ">=1.0.0" },
     { name = "mypy", marker = "extra == 'dev'", specifier = ">=1.0.0" },
     { name = "numpy", specifier = ">=1.24.0" },

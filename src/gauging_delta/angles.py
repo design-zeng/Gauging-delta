@@ -1,12 +1,13 @@
-"""Parity-safe angle computation.
+"""Angle computation with parity-critical rounding.
 
-The rounding in ``compute_angle`` exactly matches ``Perception.to_find_angle``
-from perception.py (lines 1438-1448):
+Computes the angle at a vertex between two rays. The rounding sequence is:
 
-1. ``round(norm1 * norm2, 4)`` — if zero, return 0
-2. ``round(dot / (norm1 * norm2), 4)`` — then arccos
+1. Round the product of vector norms to 4 decimal places for the zero-check only.
+2. Divide the dot product by the UNROUNDED norm product.
+3. Round the resulting cosine to 4 decimal places, then take arccos.
 
-Changing the rounding precision or order **will break parity**.
+Changing the rounding precision or order **will break parity** with the
+original algorithm implementation.
 """
 
 from __future__ import annotations
@@ -20,17 +21,13 @@ def compute_angle(
     right: np.ndarray,
     rounding: int = 4,
 ) -> float:
-    """Angle at *start* between rays to *left* and *right*.
-
-    Reproduces ``Perception.to_find_angle`` exactly.
-    """
+    """Angle (in radians) at *start* between rays to *left* and *right*."""
     v1 = left - start
     v2 = right - start
 
     dot_p = float(np.dot(v1, v2))
     norm_prod_raw = float(np.linalg.norm(v1)) * float(np.linalg.norm(v2))
-    # Legacy rounds product only for the zero check (perception.py L1444),
-    # but divides by the UNROUNDED product (perception.py L1447).
+    # Rounded product is used ONLY for the zero check; division uses the unrounded value.
     if round(norm_prod_raw, rounding) == 0:
         return 0.0
     cos_val = round(dot_p / norm_prod_raw, rounding)
@@ -70,7 +67,7 @@ def compute_angle_batch(
 
     angles = np.zeros(len(points), dtype=float)
     nonzero = norm_prods_rounded != 0
-    # Divide by unrounded product (matching legacy perception.py L1447)
+    # Divide by the unrounded product (critical for parity)
     cos_vals = np.round(dots[nonzero] / norm_prods_raw[nonzero], rounding)
     cos_vals = np.clip(cos_vals, -1.0, 1.0)
     angles[nonzero] = np.arccos(cos_vals)

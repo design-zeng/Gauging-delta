@@ -1,8 +1,19 @@
 """Continuity analysis (Paper Section II.C).
 
-Port of ``Perception.compute_local_transition`` (perception.py L713-860)
-and its helper functions.  This is **swappable** — any object implementing
-the :class:`ContinuityMetric` protocol can replace it.
+Determines whether two clusters are separated by a genuine gap or connected by
+a smooth bridge of points. It examines the region between the two closest boundary
+points (one from each cluster) at multiple radii, checking:
+
+1. **Density transition** — whether point counts change smoothly across the boundary.
+2. **Angular distribution** — whether points in each cluster's half fan out symmetrically
+   or concentrate in a narrow wedge.
+3. **Mass balance** — whether both sides of the boundary have comparable point densities.
+
+A high smoothness score means the clusters share a continuous region and should merge.
+A low score means there is a gap or density drop, and the merge should be rejected.
+
+This component is **swappable** — any object implementing the :class:`ContinuityMetric`
+protocol can replace it.
 """
 
 from __future__ import annotations
@@ -18,7 +29,7 @@ from gauging_delta.config import GaugingDeltaConfig
 
 
 class DefaultContinuity:
-    """Default continuity: angle-based local transition analysis."""
+    """Default continuity gate: multi-scale angle-based local transition analysis."""
 
     def __init__(self, cfg: GaugingDeltaConfig | None = None) -> None:
         self.cfg = cfg or GaugingDeltaConfig()
@@ -33,10 +44,11 @@ class DefaultContinuity:
         X: np.ndarray,
         point_dists: tuple[np.ndarray, np.ndarray],
     ) -> float:
-        """Compute continuity score between *lead* and *child*.
+        """Compute continuity (smoothness) score between *lead* and *child*.
 
-        Direct port of ``Perception.compute_local_transition`` (L713-860).
-        ``point_dists`` is ``(pd_indices, pd_dists)`` — sorted neighbor arrays.
+        Returns a float in [0, 1] where 1.0 = perfectly smooth transition (merge),
+        and values below *threshold* trigger rejection.
+        ``point_dists`` is ``(pd_indices, pd_dists)`` — per-point sorted neighbor arrays.
         """
         return _compute_local_transition(
             lead, child, threshold, d_ij_norm, adp_prox, X, point_dists, self.cfg
@@ -44,7 +56,7 @@ class DefaultContinuity:
 
 
 # ---------------------------------------------------------------------------
-# Core transition logic (perception.py L713-860)
+# Core transition logic
 # ---------------------------------------------------------------------------
 
 
@@ -58,13 +70,19 @@ def _compute_local_transition(
     point_dists: tuple[np.ndarray, np.ndarray],
     cfg: GaugingDeltaConfig,
 ) -> float:
-    """Full port of ``compute_local_transition`` (perception.py L713-860)."""
+    """Analyze the spatial transition between two clusters at multiple radii.
+
+    Examines the region around the midpoint of the two closest boundary points
+    (p1 from lead, p2 from child). At each radius, it measures density balance,
+    angular coverage, and transition smoothness, combining them into an overall
+    smoothness score.
+    """
     p1 = lead.ref_point
     p2 = child.ref_point
     points_dist = float(np.linalg.norm(X[p1] - X[p2]))
     middle_point = (X[p1] + X[p2]) / 2
 
-    # --- Compactness (L728-745) ---
+    # --- Compactness: how tightly packed each cluster is ---
     past_dists = [*lead.merge_history[-cfg.compact_history_window:], *child.merge_history[-cfg.compact_history_window:]]
     size1, size2 = len(lead), len(child)
 
@@ -80,21 +98,20 @@ def _compute_local_transition(
         compact2 = cfg.compact_fallback
     compact = compact1 + compact2
 
-    # --- Base length / enlarge rate (L747-753) ---
+    # --- Base length: determines the scale for the multi-radius exploration ---
     c_past_dists = [max(past_dists), points_dist] if past_dists else [points_dist]
     center_dist = float(np.linalg.norm(lead.center - child.center)) / compact
 
-    # When points_dist=0 (duplicate points), legacy gets nan for rate
-    # via numpy 0/0.  nan propagates to radius=nan, and since `dist > nan`
-    # is always False, ALL points pass the radius filter.  We replicate
-    # this exactly by using numpy division (nan instead of ZeroDivisionError).
+    # When points_dist=0 (duplicate/coincident points), numpy 0/0 produces nan.
+    # nan propagates to radius=nan, and since `dist > nan` is always False,
+    # ALL points pass the radius filter. This behavior is intentional.
     with np.errstate(divide="ignore", invalid="ignore"):
         ratio = float(np.float64(center_dist) / np.float64(points_dist))
     rate = max(ratio, cfg.enlarge_rate_floor) - cfg.enlarge_rate_floor
     enlarge_rate = 2 / (1 + math.e ** (-rate / cfg.enlarge_rate_divisor))
     base_length = float(np.mean(c_past_dists)) * enlarge_rate
 
-    # --- Explore range loop (L755-860) ---
+    # --- Multi-radius exploration: analyze the boundary at increasing radii ---
     explore_range = cfg.explore_radii
 
     locality_info: list[dict[str, Any]] = []
@@ -158,17 +175,17 @@ def _compute_local_transition(
         locality_info[i]["red"]["N"] = N1
         locality_info[i]["green"]["N"] = N2
 
-        # Remove outliers (perception.py L799-800)
+        # Remove angular outliers (points with extreme angles relative to the group)
         _local_points1 = _remove_outliers(_local_points1, middle_point, X, cfg)
         _local_points2 = _remove_outliers(_local_points2, middle_point, X, cfg)
 
         if len(_local_points1) > 1 and len(_local_points2) > 1:
-            # Surrounded check (perception.py L803-806)
+            # Check if child is completely surrounded by lead's points
             if not surrounded:
                 count2 = sum(1 for p in _local_points2[:, 0] if int(p) in c1_points_set)
                 surrounded = count2 >= len(child) and count2 > N2 / 2
 
-            # Max angle (perception.py L808-809)
+            # Find the widest angular gap in each side's point distribution
             max_angle_info1 = _compute_max_angle(_local_points1, p1, X, cfg)
             max_angle_info2 = _compute_max_angle(_local_points2, p2, X, cfg)
 
@@ -185,7 +202,8 @@ def _compute_local_transition(
             locality_info[i]["green"]["max angle"] = area2
             locality_info[i]["mass_smoothness"] = min(mass1, mass2) / max(mass1, mass2)
 
-            # Angle transition (perception.py L822-827)
+            # Angle transition: how well the angular extremes from each side
+            # align with points on the other side
             angle_smoothness = _compute_angle_transition(
                 p1,
                 p2,
@@ -197,7 +215,7 @@ def _compute_local_transition(
             )
             locality_info[i]["angle_smoothness"] = angle_smoothness
 
-            # Transition smoothness (perception.py L829)
+            # Density transition: how evenly points are distributed across the boundary
             transition_smoothness = _compute_transition_smoothness(
                 p1,
                 p2,
@@ -210,7 +228,7 @@ def _compute_local_transition(
             )
             locality_info[i]["transition_smoothness"] = transition_smoothness
 
-        # Orientation = sqrt(mass * angle) (perception.py L832-834)
+        # Orientation smoothness = geometric mean of mass balance and angle alignment
         orientation_smoothness = math.sqrt(
             locality_info[i]["mass_smoothness"] * locality_info[i]["angle_smoothness"]
         )
@@ -225,7 +243,7 @@ def _compute_local_transition(
         if locality_info[i]["smoothness"] <= threshold_cont:
             min_radius = i
 
-        # Early termination checks (perception.py L847-859)
+        # Early termination: stop exploring larger radii when the signal is clear
         if i > 0:
             if locality_info[i]["is_boundary"] and locality_info[i - 1]["is_boundary"]:
                 min_radius = i
@@ -236,9 +254,8 @@ def _compute_local_transition(
                 min_radius = i
                 break
 
-            # Legacy has NO guard on this division (perception.py L857).
-            # When prev=0 and curr>0, numpy gives +inf, and inf > e → True,
-            # triggering the early break.  We must replicate this exactly.
+            # Unguarded division: when prev=0 and curr>0, numpy produces inf.
+            # inf > mass_ratio_jump triggers the early break. This is intentional.
             with np.errstate(divide="ignore", invalid="ignore"):
                 mass_ratio = float(
                     np.float64(locality_info[i]["mass_smoothness"])
@@ -266,9 +283,11 @@ def _filter_local_points(
     *,
     find_all: bool = False,
 ) -> np.ndarray:
-    """Apply angle filter and sort to pre-computed candidates and angles.
+    """Filter candidate points to those on one side of the boundary midpoint.
 
-    Returns (n, 2) array: columns are [point_index, angle].
+    By default, keeps only points whose angle from the midpoint is within [-pi/2, pi/2]
+    of the reference direction (i.e., on the same side as the reference cluster).
+    Returns an (n, 2) array with columns [point_index, angle], sorted by angle.
     """
     if len(cand_indices) == 0:
         return np.empty((0, 2))
@@ -299,7 +318,7 @@ def _remove_outliers(
     X: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> np.ndarray:
-    """Port of ``remove_outliers`` (perception.py L1037-1043)."""
+    """Remove the last (widest-angle) point if it is an angular outlier."""
     n = len(local_points)
     if n > cfg.outlier_min_points and _contain_outliers(local_points, middle_point, X):
         return local_points[:-1]
@@ -311,7 +330,11 @@ def _contain_outliers(
     middle_point: np.ndarray,
     X: np.ndarray,
 ) -> bool:
-    """Port of ``contain_outliers`` (perception.py L1017-1023)."""
+    """Check if the last point (widest angle) is an outlier.
+
+    Returns True if no other point has an angle less than half the last point's angle
+    when measured from the midpoint, indicating the last point is isolated.
+    """
     last_angle = local_points[-1][1]
     last_point = int(local_points[-1][0])
     if len(local_points) <= 1:
@@ -327,9 +350,10 @@ def _compute_max_angle(
     X: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> tuple[int, int, float]:
-    """Port of ``compute_max_angle`` (perception.py L701-711).
+    """Find the widest angular gap in the local point distribution.
 
-    Returns (max_point_1, max_point_2, angle).
+    Returns (point_a, point_b, angle) where point_a and point_b are the two
+    points that define the largest angle as seen from ref_point.
     """
     max_p1 = int(local_points[-1][0])
     max_angle1 = local_points[-1][1]
@@ -343,7 +367,7 @@ def _compute_max_angle(
             idx = int(exceeds[-1])
             return max_p1, int(local_points[idx][0]), float(angles[idx])
 
-    # Fallback: compare last with first (perception.py L709-710)
+    # Fallback: use the angle between the last and first points
     angle = compute_angle(X[ref_point], X[max_p1], X[int(local_points[0][0])])
     return max_p1, int(local_points[0][0]), angle if angle != 0 else max_angle1
 
@@ -357,7 +381,12 @@ def _compute_angle_transition(
     X: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> float:
-    """Port of ``compute_angle_transition_2`` (perception.py L1045-1069)."""
+    """Measure how well the angular extremes from one side align with the other side.
+
+    For each side's widest-angle pair, find the smallest matching angle among points
+    on the opposite side. Returns the mean alignment score (0 = perpendicular/no match,
+    1 = perfectly aligned).
+    """
     if len(local_points1) == 0 or len(local_points2) == 0:
         return 1.0
 
@@ -385,7 +414,12 @@ def _find_smallest_angle_pair(
     points: np.ndarray,
     X: np.ndarray,
 ) -> tuple[float, float]:
-    """Fused dual _find_smallest_angle: batch all 3 reference vectors (rp, pa, pb)."""
+    """Find the smallest angle from start_p to each of pa and pb among candidate points.
+
+    Only considers candidates whose angle to rp (the reference point) is at least as
+    large as their angle to pa/pb, ensuring directional consistency. Returns (min_angle_pa,
+    min_angle_pb), defaulting to pi (no match) when no qualifying candidate exists.
+    """
     if len(points) == 0:
         return math.pi, math.pi
 
@@ -426,7 +460,12 @@ def _compute_transition_smoothness(
     point_dists: tuple[np.ndarray, np.ndarray],
     cfg: GaugingDeltaConfig,
 ) -> float:
-    """Port of ``compute_transition_smoothness`` (perception.py L1176-1188)."""
+    """Measure how smoothly point density transitions across the boundary.
+
+    Counts points from each cluster that fall inside vs. outside the partner's radius,
+    producing four counts (r_e, r_i, g_i, g_e = external/internal for each side).
+    A smooth transition has balanced internal-to-external ratios on both sides.
+    """
     r_e, r_i, g_i, g_e = _compute_transition_state(p1, p2, N1, N2, radius, point_dists)
     if r_e == 0 or g_e == 0:
         return max(cfg.transition_external_zero_fallback, (max(N1, N2) / min(N1, N2)) / r_rate) if r_rate != 0 else cfg.transition_external_zero_fallback
@@ -449,12 +488,15 @@ def _compute_transition_state(
     radius: float,
     point_dists: tuple[np.ndarray, np.ndarray],
 ) -> tuple[float, float, float, float]:
-    """Port of ``compute_transition_state`` (perception.py L1363-1370).
+    """Count how points from each cluster distribute inside vs. outside the boundary.
 
-    Returns (r_e, r_i, g_i, g_e) -- external/internal counts per side.
+    Returns (r_e, r_i, g_i, g_e) where:
+      - r_i = "red internal"  — points near p2 that belong to p1's cluster
+      - r_e = "red external"  — points near p1 that belong to p1's cluster
+      - g_i = "green internal" — points near p1 that belong to p2's cluster
+      - g_e = "green external" — points near p2 that belong to p2's cluster
 
-    Since find_all=True keeps ALL candidates (no angle filter), the count
-    equals the number of neighbors within radius, obtainable via searchsorted.
+    Uses searchsorted on pre-sorted distance arrays for O(log N) lookups.
     """
     _, pd_dists = point_dists
     count_1 = int(np.searchsorted(pd_dists[p1], radius, side="right"))

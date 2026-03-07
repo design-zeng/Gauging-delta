@@ -1,12 +1,24 @@
-"""Adaptive threshold T = beta * T_stat * xi_s  (Paper Eq. 4).
+"""Adaptive threshold: T = beta * T_stat * xi_s  (Paper Eq. 4).
 
-Port of ``Perception.compute_adaptive_threshold`` (perception.py L350-573).
-This is the fixed composition-glue layer — NOT swappable.
+Decides the maximum proximity (rho) at which two clusters may merge.
+Three factors are multiplied together:
+
+- **beta** (vision_scale): environmental scaling based on gravitational forces from
+  nearby clusters. If surrounding clusters are close, beta shrinks the threshold
+  to discourage merging across dense regions.
+- **T_stat**: statistical threshold derived from each cluster's merge-distance history.
+  Clusters that have been merging at short distances get a tighter threshold.
+- **xi_s**: shape similarity between the two clusters' spread (sigma) histories.
+  Clusters with similar internal structure get a more permissive threshold.
+
+This module is NOT swappable — it is fixed composition glue between the swappable
+proximity and continuity components.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 from typing import NamedTuple
 
 import numpy as np
@@ -15,7 +27,7 @@ from gauging_delta.cluster import Cluster
 from gauging_delta.config import GaugingDeltaConfig
 
 
-def _point_dist(a: np.ndarray, b: np.ndarray, metric: str | callable = "euclidean") -> float:
+def _point_dist(a: np.ndarray, b: np.ndarray, metric: str | Callable[..., float] = "euclidean") -> float:
     """Distance between two points using the given metric."""
     if metric == "euclidean":
         diff = a - b
@@ -25,20 +37,24 @@ def _point_dist(a: np.ndarray, b: np.ndarray, metric: str | callable = "euclidea
     return float(cdist(a.reshape(1, -1), b.reshape(1, -1), metric=metric)[0, 0])
 
 
-def _row_dists(X: np.ndarray, y: np.ndarray, metric: str | callable = "euclidean") -> np.ndarray:
+def _row_dists(X: np.ndarray, y: np.ndarray, metric: str | Callable[..., float] = "euclidean") -> np.ndarray:
     """Distances from each row of X to point y."""
     if metric == "euclidean":
-        return np.linalg.norm(X - y, axis=1)
+        result: np.ndarray = np.linalg.norm(X - y, axis=1)
+        return result
     from scipy.spatial.distance import cdist
 
-    return cdist(X, y.reshape(1, -1), metric=metric).ravel()
+    result = cdist(X, y.reshape(1, -1), metric=metric).ravel()
+    return result
 
 
 class ThresholdResult(NamedTuple):
-    T_i: float
-    T_j: float
-    xi_s: float
-    adp_prox: float
+    """Result of adaptive threshold computation for a candidate merge."""
+
+    T_i: float  # threshold for the lead cluster
+    T_j: float  # threshold for the child cluster
+    xi_s: float  # shape similarity factor (1.0 = no penalty)
+    adp_prox: float  # size-weighted average threshold (used by continuity)
 
 
 def compute_adaptive_threshold(
@@ -50,9 +66,9 @@ def compute_adaptive_threshold(
     dist_matrix: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> ThresholdResult:
-    """Compute adaptive thresholds T_i, T_j, shape similarity xi_s.
+    """Compute adaptive thresholds T_i and T_j for a candidate merge.
 
-    Direct port of perception.py L350-573 (minus plotting).
+    A merge is allowed only when rho <= T_i AND rho <= T_j.
     """
     size1 = len(lead)
     size2 = len(child)
@@ -61,7 +77,7 @@ def compute_adaptive_threshold(
 
     k = min(len(all_clusters) - 1, cfg.num_nearest_clusters)
 
-    # --- Step 1: nearest cluster distances (perception.py L354-360) ---
+    # --- Step 1: find k nearest clusters to each candidate ---
     row1 = dist_matrix[c1_id, :]
     row2 = dist_matrix[c2_id, :]
     idx1 = _k_smallest_indices(row1, k)
@@ -72,16 +88,16 @@ def compute_adaptive_threshold(
     nd1 = nd1[~np.isinf(nd1)]
     nd2 = nd2[~np.isinf(nd2)]
 
-    # --- Step 2: vision scale / beta (perception.py L362-400) ---
+    # --- Step 2: beta (vision scale) — environmental scaling from nearby clusters ---
     vision_scale = _compute_vision_scale(
         c1_id, c2_id, d_ij, idx1, idx2, all_clusters, dist_matrix, cfg
     )
 
-    # --- Step 3: T_stat per cluster (perception.py L402-417) ---
+    # --- Step 3: T_stat — statistical threshold from each cluster's merge history ---
     t1 = _compute_t_stat(lead, cfg) * vision_scale
     t2 = _compute_t_stat(child, cfg) * vision_scale
 
-    # --- Step 4: shape similarity xi_s (perception.py L419-468) ---
+    # --- Step 4: xi_s — shape similarity between lead and child spread histories ---
     xi_s = _compute_xi_s(lead, child, cfg)
     t1 *= xi_s
     t2 *= xi_s
@@ -96,7 +112,7 @@ def compute_adaptive_threshold(
 
 
 def _k_smallest_indices(row: np.ndarray, k: int) -> np.ndarray:
-    """Return sorted indices of k smallest values in *row* (like perception.py get_indices_of_k_smallest)."""
+    """Return indices of the k smallest values in *row*, sorted by value."""
     k = min(k, len(row))
     idx = np.argpartition(row, k)[:k]
     return idx[np.argsort(row[idx])]
@@ -112,13 +128,18 @@ def _compute_vision_scale(
     dist_matrix: np.ndarray,
     cfg: GaugingDeltaConfig,
 ) -> float:
-    """Force-weighted environmental scaling (perception.py L362-400)."""
-    # base force between the two clusters
+    """Compute beta (vision scale): how the surrounding cluster environment
+    affects the merge threshold.
+
+    Finds clusters that are neighbors of BOTH c1 and c2 (shared context),
+    computes a gravitational force for each, and uses these to scale the
+    threshold via a sigmoid on the distance ratio d_ij / avg_context_dist.
+    """
     base_force = _compute_force(c1_id, c2_id, all_clusters, dist_matrix)
     if base_force == 0:
         return 1.0
 
-    # Find shared contextual clusters (perception.py L365-370)
+    # Find clusters that appear in both c1's and c2's nearest-neighbor lists
     set2 = set(idx2.tolist())
     forces: list[tuple[float, int]] = [(1.0, c2_id)]
     for c in idx1:
@@ -133,7 +154,7 @@ def _compute_vision_scale(
 
     forces.sort(key=lambda x: x[0], reverse=True)
 
-    # Take top N_rc contextual clusters (perception.py L374-390)
+    # Take the top N_rc contextual clusters by force weight
     cont_clusters: list[tuple[float, float]] = []
     total_affect = 0.0
     for weight, cid in forces:
@@ -144,7 +165,7 @@ def _compute_vision_scale(
         if len(cont_clusters) == cfg.n_contextual_clusters:
             break
 
-    # Weighted vision scale (perception.py L392-396)
+    # Weighted average of sigmoid(d_ij / avg_context_dist) across contextual clusters
     vs = 0.0
     for weight, avg_d in cont_clusters:
         dist_ratio = d_ij / avg_d if avg_d != 0 else cfg.vision_scale_dist_ratio_fallback
@@ -162,7 +183,10 @@ def _compute_force(
     all_clusters: dict[int, Cluster],
     dist_matrix: np.ndarray,
 ) -> float:
-    """Gravitational force = m1*m2 / d^2 (perception.py L344-348)."""
+    """Gravitational attraction between two clusters: m1 * m2 / d^2.
+
+    Distance is the average of single-linkage distance and centroid distance.
+    """
     near_d = dist_matrix[c1_id, c2_id]
     if np.isinf(near_d):
         return 0.0
@@ -174,13 +198,16 @@ def _compute_force(
 
 
 def _compute_t_stat(cluster: Cluster, cfg: GaugingDeltaConfig) -> float:
-    """Statistical threshold from merge history (perception.py L402-417).
+    """Statistical threshold derived from a cluster's merge-distance history.
 
     T_stat = numerator / (1 + e^(coeff * mu/sigma)) + offset
-    Cached on cluster; invalidated when merge_history length changes.
+
+    A cluster that has been merging at consistent (low-variance) distances gets a
+    tighter T_stat, making it harder to merge with distant clusters. Falls back to
+    a constant when history is too short. Cached on the cluster object.
     """
     mh_len = len(cluster.merge_history)
-    cache = getattr(cluster, "_t_stat_cache", None)
+    cache = cluster._t_stat_cache
     if cache is not None and cache[0] == mh_len:
         return cache[1]
     if mh_len > cfg.t_stat_min_history:
@@ -191,11 +218,11 @@ def _compute_t_stat(cluster: Cluster, cfg: GaugingDeltaConfig) -> float:
                 cfg.t_stat_numerator / (1 + math.e ** (cfg.t_stat_exp_coeff * mu / sigma))
                 + cfg.t_stat_offset
             )
-            cluster._t_stat_cache = (mh_len, result)  # type: ignore[attr-defined]
+            cluster._t_stat_cache = (mh_len, result)
             return result
-        cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)  # type: ignore[attr-defined]
+        cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)
         return cfg.t_stat_fallback
-    cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)  # type: ignore[attr-defined]
+    cluster._t_stat_cache = (mh_len, cfg.t_stat_fallback)
     return cfg.t_stat_fallback
 
 
@@ -205,16 +232,16 @@ def compute_adaptive_threshold_lite(
     d_ij: float,
     rho: float,
     all_clusters: dict[int, Cluster],
-    centers: np.ndarray,  # (K, D) array of active cluster centers
-    center_ids: list[int],  # maps position → cluster ID
-    center_id_to_pos: dict[int, int],  # maps cluster ID → position
+    centers: np.ndarray,  # (K, D) array of active cluster centroids
+    center_ids: list[int],  # maps array position -> cluster ID
+    center_id_to_pos: dict[int, int],  # maps cluster ID -> array position
     cfg: GaugingDeltaConfig,
-    metric: str | callable = "euclidean",
+    metric: str | Callable[..., float] = "euclidean",
 ) -> ThresholdResult:
-    """Lite-mode adaptive threshold using brute-force centroid scans.
+    """Lite-mode adaptive threshold using centroid distances only.
 
-    Replaces KDTree queries with O(K·D) numpy norm computations.
-    In lite mode, all inter-cluster distances are centroid distances.
+    Same logic as the full-mode threshold, but replaces the dense distance matrix
+    with brute-force O(K*D) centroid scans for nearest-neighbor lookups.
     """
     size1 = len(lead)
     size2 = len(child)
@@ -224,7 +251,7 @@ def compute_adaptive_threshold_lite(
     k = min(len(all_clusters) - 1, cfg.num_nearest_clusters)
     K = len(center_ids)
 
-    # --- Step 1: K nearest clusters via brute-force (O(K·D) each) ---
+    # --- Step 1: find k nearest clusters via brute-force centroid scan ---
     if K < 2:
         nd1 = np.array([d_ij])
         nd2 = np.array([d_ij])
@@ -263,16 +290,16 @@ def compute_adaptive_threshold_lite(
     nd1 = nd1[~np.isinf(nd1)]
     nd2 = nd2[~np.isinf(nd2)]
 
-    # --- Step 2: vision scale / beta ---
+    # --- Step 2: beta (vision scale) — environmental scaling ---
     vision_scale = _compute_vision_scale_lite(
         c1_id, c2_id, d_ij, idx1_ids, idx2_ids, all_clusters, cfg, metric
     )
 
-    # --- Step 3: T_stat per cluster ---
+    # --- Step 3: T_stat — statistical threshold from merge history ---
     t1 = _compute_t_stat(lead, cfg) * vision_scale
     t2 = _compute_t_stat(child, cfg) * vision_scale
 
-    # --- Step 4: shape similarity xi_s ---
+    # --- Step 4: xi_s — shape similarity ---
     xi_s = _compute_xi_s(lead, child, cfg)
     t1 *= xi_s
     t2 *= xi_s
@@ -285,9 +312,9 @@ def _compute_force_lite(
     c1_id: int,
     c2_id: int,
     all_clusters: dict[int, Cluster],
-    metric: str | callable = "euclidean",
+    metric: str | Callable[..., float] = "euclidean",
 ) -> float:
-    """Gravitational force using centroid distance only (lite mode)."""
+    """Gravitational attraction m1*m2/d^2 using centroid distance only (lite mode)."""
     if c1_id not in all_clusters or c2_id not in all_clusters:
         return 0.0
     d = _point_dist(all_clusters[c1_id].center, all_clusters[c2_id].center, metric)
@@ -309,9 +336,11 @@ def _compute_vision_scale_lite(
     idx2_ids: np.ndarray,
     all_clusters: dict[int, Cluster],
     cfg: GaugingDeltaConfig,
-    metric: str | callable = "euclidean",
+    metric: str | Callable[..., float] = "euclidean",
 ) -> float:
-    """Force-weighted environmental scaling using direct centroid distances (lite mode)."""
+    """Beta (vision scale) for lite mode — same logic as full mode but using
+    centroid distances instead of single-linkage distances.
+    """
     base_force = _compute_force_lite(c1_id, c2_id, all_clusters, metric)
     if base_force == 0:
         return 1.0
@@ -355,10 +384,12 @@ def _compute_vision_scale_lite(
 
 
 def _compute_xi_s(lead: Cluster, child: Cluster, cfg: GaugingDeltaConfig) -> float:
-    """Shape similarity xi_s (perception.py L419-466).
+    """Shape similarity xi_s between two clusters.
 
-    xi_s = max(l_same_std, most_same_std) / (1 + max(...)) + 0.5
-    Returns 1.0 when history is too short (N <= xi_s_min_history).
+    Compares the spread (sigma) histories of lead and child. Clusters whose
+    internal spread evolved similarly get xi_s close to 1.0 (permissive);
+    dissimilar shapes push xi_s toward 0.5 (restrictive). Returns 1.0
+    when history is too short to judge.
     """
     n1 = len(lead.sigma_history)
     n2 = len(child.sigma_history)
@@ -367,7 +398,7 @@ def _compute_xi_s(lead: Cluster, child: Cluster, cfg: GaugingDeltaConfig) -> flo
     if n2 <= 1 or n <= cfg.xi_s_min_history:
         return 1.0
 
-    # perception.py L423-456
+    # Compare sigma histories over aligned windows
     m5 = float(np.mean(lead.sigma_history[-n:])) if n > 0 else 0.0
     m6 = float(np.mean(child.sigma_history[-n:])) if n > 0 else 0.0
 

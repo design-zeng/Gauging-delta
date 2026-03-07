@@ -1,12 +1,18 @@
 """Gauging-delta hierarchical clustering algorithm.
 
 sklearn-compatible API with swappable proximity, continuity, and linkage metrics.
-Port of ``Perception.fit`` (perception.py L48-146) and supporting methods.
+
+The algorithm iteratively merges clusters bottom-up (each point starts as its own
+cluster). At each step it finds the closest pair, checks whether a merge is
+justified via proximity and adaptive threshold gates, optionally verifies spatial
+continuity, and merges if all gates pass. It stops when no more valid merges exist
+or a target cluster count is reached.
 """
 
 from __future__ import annotations
 
 import math
+from collections.abc import Callable
 
 import numpy as np
 from sklearn.base import BaseEstimator, ClusterMixin
@@ -68,7 +74,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         *,
         n_clusters: int | None = None,
         mode: str = "full",
-        metric: str | callable = "euclidean",
+        metric: str | Callable[..., float] = "euclidean",
         config: GaugingDeltaConfig | None = None,
         proximity: ProximityMetric | None = None,
         continuity: ContinuityMetric | None | bool = None,
@@ -95,15 +101,18 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         """Pairwise distances between rows of *X* and *Y*."""
         from scipy.spatial.distance import cdist
 
-        return cdist(X, Y, metric=self.metric)
+        result: np.ndarray = cdist(X, Y, metric=self.metric)
+        return result
 
     def _row_dists(self, X: np.ndarray, y: np.ndarray) -> np.ndarray:
         """Distances from each row of *X* to single point *y*. Returns (len(X),)."""
         if self.metric == "euclidean" or self._precomputed:
-            return np.linalg.norm(X - y, axis=1)
+            result: np.ndarray = np.linalg.norm(X - y, axis=1)
+            return result
         from scipy.spatial.distance import cdist
 
-        return cdist(X, y.reshape(1, -1), metric=self.metric).ravel()
+        result = cdist(X, y.reshape(1, -1), metric=self.metric).ravel()
+        return result
 
     def _point_dist(self, a: np.ndarray, b: np.ndarray) -> float:
         """Distance between two single points."""
@@ -177,7 +186,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
 
     # ----- sklearn-compatible interface ------------------------------------
 
-    def fit(self, X, y=None):
+    def fit(self, X, y=None) -> GaugingDelta:
         """Run Gauging-delta on data matrix *X*.
 
         Parameters
@@ -240,11 +249,11 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
 
         # Trivial: 0 or 1 sample
         if n <= 1:
-            self._clusters = {
+            self._clusters: dict[int, Cluster] = {
                 i: Cluster(label=i, point_indices=[i], center=self._X[i].copy())
                 for i in range(n)
             }
-            self._merge_log = []
+            self._merge_log: list[tuple[int, int, float]] = []
             self._build_labels()
             return self
 
@@ -252,8 +261,8 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         if not self._precomputed and self.metric != "euclidean" and n >= 3:
             self._validate_metric()
 
-        # --- Initialise singleton clusters (perception.py L56-69) ---
-        self._clusters: dict[int, Cluster] = {
+        # --- Initialise singleton clusters: one cluster per data point ---
+        self._clusters = {
             i: Cluster(
                 label=i,
                 point_indices=[i],
@@ -262,7 +271,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             for i in range(n)
         }
 
-        # --- Pairwise distances (perception.py L72, L176-220) ---
+        # --- Pairwise distances and nearest-neighbor structures ---
         if self.mode == "full":
             self._dist_matrix = np.full((n, n), np.inf)
             self._near_ref = np.empty((n, n), dtype=int)
@@ -277,9 +286,9 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             )
 
         # --- Merge log for hierarchical outputs ---
-        self._merge_log: list[tuple[int, int, float]] = []
+        self._merge_log = []
 
-        # --- Main merge loop (perception.py L75-127) ---
+        # --- Main merge loop: repeatedly find closest pair and attempt merge ---
         early_stop = False
         while len(self._clusters) > 1:
             pre_length = len(self._clusters)
@@ -296,7 +305,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
                     early_stop = True
                     break
 
-                # Skip dead pairs (perception.py L97)
+                # Skip pairs where one cluster was already merged away
                 if self.mode == "lite":
                     if c1 not in self._clusters or c2 not in self._clusters:
                         i += 1
@@ -305,7 +314,9 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
                     i += 1
                     continue
 
-                # last_merged heuristic (perception.py L104-113)
+                # Greedy heuristic: after a merge, check if the newly merged cluster's
+                # nearest neighbor is closer than the next queued pair. If so, try
+                # that pair first instead of advancing the queue.
                 if last_merged is not None:
                     _c = self._get_nearest_cluster(last_merged)
                     if _c is not None:
@@ -329,10 +340,9 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
                 else:
                     i += 1
 
-                # Try mergeability pipeline (perception.py L259-342)
-                # NOTE: legacy does NOT increment i on merge failure.
-                # The else:i+=1 at perception.py L122-123 pairs with
-                # if ~np.isinf (L97), not with if is_complete (L116).
+                # Run the mergeability pipeline (proximity -> threshold -> continuity).
+                # NOTE: i is NOT incremented on merge failure — only on dead-pair
+                # skips or when the heuristic does not fire.
                 merged_id = self._try_merge(c1, c2)
                 if merged_id is not None:
                     last_merged = merged_id
@@ -340,7 +350,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             if pre_length == len(self._clusters) or early_stop:
                 break
 
-        # Post-processing: force to n_clusters if needed (perception.py L128-139)
+        # Post-processing: force-merge remaining clusters to reach n_clusters
         if self.n_clusters is not None and self.n_clusters < len(self._clusters):
             self._post_processing()
 
@@ -358,7 +368,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             self._init_distances_full()
 
     def _init_distances_full(self) -> None:
-        """Full mode: single-linkage distances + sorted neighbor arrays."""
+        """Full mode: build dense distance matrix, nearest-ref arrays, and sorted neighbors."""
         n = len(self._X)
 
         # Pairwise distances: precomputed → use directly, else compute via cdist
@@ -370,26 +380,27 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         self._dist_matrix = pairwise.copy()
         np.fill_diagonal(self._dist_matrix, np.inf)
 
-        # For singletons: nearest point in cluster i to cluster j = point i itself
-        # _near_ref[i, j] = i for all j (vectorized init)
+        # _near_ref[i, j] = index of the point in cluster i that is closest to cluster j.
+        # For singletons, that is always point i itself.
         idx = np.arange(n)
         self._near_ref[:] = idx[:, np.newaxis]
 
-        # Sorted neighbor arrays: only needed when continuity is enabled
+        # Sorted neighbor arrays for continuity analysis.
         if self._cont is not None:
-            # _pd_indices[i] = neighbor indices sorted by distance from point i
-            # _pd_dists[i] = corresponding sorted distances
-            # kind="stable" matches legacy Python list.sort tie-breaking (lower index first)
-            # Mask self-distances to inf so self never appears in sorted neighbors
-            # (simple [:, 1:] fails for duplicate points where pairwise[i,j]=0=pairwise[i,i])
+            # _pd_indices[i] = point indices sorted by distance from point i (excluding self)
+            # _pd_dists[i]   = corresponding sorted distances
+            # kind="stable" preserves index order on ties (lower index first).
+            # Self-distances are masked to inf rather than using [:, 1:] because
+            # duplicate points can have pairwise[i,j]=0=pairwise[i,i].
             pw_no_self = pairwise.copy()
             np.fill_diagonal(pw_no_self, np.inf)
             full_order = np.argsort(pw_no_self, axis=1, kind="stable")[:, : n - 1]
             self._pd_indices = full_order
             self._pd_dists = np.take_along_axis(pairwise, full_order, axis=1)
 
-        # MIN_BTN_CLUSTER_DIST (perception.py L213)
-        # Row-wise minimum tracking: per-row argmin column + value arrays
+        # Row-wise minimum tracking for O(1) nearest-cluster lookups.
+        # _row_argmins[i] = column of the closest cluster to i
+        # _row_mins[i]    = that distance value
         self._row_argmins = np.argmin(self._dist_matrix, axis=1).astype(int)
         self._row_mins = self._dist_matrix[np.arange(n), self._row_argmins].copy()
         upper = pairwise[np.triu_indices(n, k=1)]
@@ -436,9 +447,9 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
     # ----- Sorted pairs ----------------------------------------------------
 
     def _get_sorted_pairs(self) -> np.ndarray:
-        """Port of ``get_indices_of_k_smallest`` (perception.py L80, L247-255).
+        """Return the k closest cluster pairs sorted by ascending distance.
 
-        Returns (2, k) array of (row, col) pairs sorted by distance.
+        Returns a (2, k) array where row 0 is cluster IDs and row 1 is partner IDs.
         """
         if self.mode == "lite":
             return self._get_sorted_pairs_lite()
@@ -545,19 +556,24 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         return self._try_merge_full(c1, c2)
 
     def _try_merge_full(self, c1: int, c2: int) -> int | None:
-        """Full mode: proximity → threshold → continuity → merge."""
+        """Full mode: proximity -> threshold -> continuity -> merge.
+
+        Returns the lead cluster ID on successful merge, or None if any gate rejects.
+        """
         C_i = self._clusters[c1]
         C_j = self._clusters[c2]
         d_ij: float = float(self._dist_matrix[c1, c2])
 
-        # Step 1: Proximity (perception.py L310)
+        # Gate 1 — Proximity: compute rho (= d_ij / mean_historical_distance).
+        # rho measures how far apart these clusters are relative to past merges.
         prox = self._prox.compute(C_i, C_j, d_ij, self._fallback_dist)
         rho = prox.rho
         lead_id, child_id = prox.lead_id, prox.child_id
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
-        # Step 2: Adaptive threshold (perception.py L312-313)
+        # Gate 2 — Adaptive threshold: compute T = beta * T_stat * xi_s.
+        # T adapts based on local cluster density, merge statistics, and shape similarity.
         thr = compute_adaptive_threshold(
             lead,
             child,
@@ -568,11 +584,12 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             self._cfg,
         )
 
-        # Gate: proximity > threshold → reject (perception.py L318)
+        # Reject if rho exceeds the threshold for either cluster
         if rho > thr.T_i or rho > thr.T_j:
             return None
 
-        # Step 3: Continuity (perception.py L323-325)
+        # Gate 3 — Continuity: check spatial smoothness between the two clusters
+        # by analyzing point density and angular distribution in the gap region.
         if self._cont is not None:
             lead.ref_point = int(self._near_ref[lead_id, child_id])
             child.ref_point = int(self._near_ref[child_id, lead_id])
@@ -589,7 +606,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
                 (self._pd_indices, self._pd_dists),
             )
 
-            # Gate: smoothness > threshold → accept merge (perception.py L328)
+            # Reject if the gap region is not smooth enough
             if smoothness <= cont_threshold:
                 return None
 
@@ -604,7 +621,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         return lead_id
 
     def _try_merge_lite(self, c1: int, c2: int) -> int | None:
-        """Lite mode: proximity → threshold → merge (no continuity)."""
+        """Lite mode: proximity -> threshold -> merge (no continuity gate)."""
         from gauging_delta.threshold import compute_adaptive_threshold_lite
 
         C_i = self._clusters[c1]
@@ -658,11 +675,15 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             self._do_merge_full(lead_id, child_id)
 
     def _do_merge_full(self, lead_id: int, child_id: int) -> None:
-        """Full mode: Lance-Williams single-linkage update."""
+        """Full mode: absorb child into lead and update the distance matrix.
+
+        Uses the Lance-Williams formula for single-linkage:
+        dist(A+B, C) = min(dist(A, C), dist(B, C)).
+        """
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
-        # --- Merge data (perception.py L298-306) ---
+        # --- Record the edge that connects the two clusters ---
         p1 = int(self._near_ref[lead_id, child_id])
         p2 = int(self._near_ref[child_id, lead_id])
         lead.merge_edges.append((p1, p2))
@@ -676,13 +697,13 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         lead.sigma_dist = float(np.std(dist_data))
         lead.sigma_history.append(lead.sigma_dist)
 
-        # Extend history from child (perception.py L306)
+        # Absorb child's merge history into lead
         lead.merge_history.extend(child.merge_history)
 
-        # --- Update clusters (perception.py L277-291) ---
+        # --- Update distance matrix via Lance-Williams single-linkage ---
 
-        # Snapshot child's distances and refs BEFORE deletion
-        # Lance-Williams: near_dist(A∪B, C) = min(near_dist(A,C), near_dist(B,C))
+        # Snapshot child's distances and refs BEFORE deletion so we can
+        # apply min(lead_dist, child_dist) for each remaining cluster.
         child_near_row = self._dist_matrix[child_id, :].copy()
         child_ref_self = self._near_ref[child_id, :].copy()
         child_ref_other = self._near_ref[:, child_id].copy()
@@ -693,8 +714,8 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
 
         active = np.argwhere(~np.isinf(self._dist_matrix[lead_id, :])).reshape(-1)
 
-        # Vectorized Lance-Williams update: only update where child was closer
-        # Strict < so lead wins on exact tie (matches legacy argmin first-occurrence)
+        # Only update entries where child was strictly closer than lead.
+        # Strict < ensures lead wins on exact ties (matches legacy argmin behavior).
         child_dists = child_near_row[active]
         lead_dists = self._dist_matrix[lead_id, active]
         mask = child_dists < lead_dists
@@ -705,9 +726,8 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         self._near_ref[lead_id, winning] = child_ref_self[winning]
         self._near_ref[winning, lead_id] = child_ref_other[winning]
 
-        # Update MIN_BTN_CLUSTER_DIST (perception.py L290)
-        # Row-wise minimum tracking: maintain per-row min value + position.
-        # Only rescan rows that actually changed instead of full O(N²) scan.
+        # Incrementally update row-wise minimum tracking arrays.
+        # Only rescan rows that actually changed instead of a full O(N^2) scan.
 
         # 1. Identify stale rows (argmin pointed to the now-dead child)
         stale_mask = self._row_argmins == child_id
@@ -739,7 +759,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             self._row_argmins[c] = c_min_col
             self._row_mins[c] = self._dist_matrix[c, c_min_col]
 
-        # 6. Global min → update fallback_dist
+        # 6. Update fallback_dist (used as denominator when clusters lack merge history)
         current_min = float(np.min(self._row_mins))
         if not np.isinf(current_min):
             self._fallback_dist = max(current_min, self._fallback_dist)
@@ -796,7 +816,11 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
     # ----- Post-processing -------------------------------------------------
 
     def _post_processing(self) -> None:
-        """Force merge down to n_clusters (perception.py L161-173)."""
+        """Force-merge remaining clusters down to n_clusters.
+
+        Keeps the n_clusters largest clusters and merges each smaller cluster
+        into its nearest large cluster.
+        """
         if self.n_clusters is None:
             return
         ranking = sorted(self._clusters.items(), key=lambda x: len(x[1]))
@@ -822,7 +846,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             self._force_merge(lead_id, child_id)
 
     def _force_merge(self, lead_id: int, child_id: int) -> None:
-        """Unconditional merge for post-processing (perception.py L172)."""
+        """Unconditional merge (bypasses all gates). Used only in post-processing."""
         lead = self._clusters[lead_id]
         child = self._clusters[child_id]
 
@@ -858,7 +882,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
     # ----- Label construction ----------------------------------------------
 
     def _build_labels(self) -> None:
-        """Assign final labels to each point."""
+        """Assign final labels and build scipy-compatible hierarchical outputs."""
         n = len(self._X)
         labels = np.full(n, -1, dtype=int)
 
@@ -878,7 +902,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
             ordered = sorted(self._clusters.items())
             self.cluster_centers_ = np.array([c.center for _, c in ordered])
 
-        # Build hierarchical outputs from merge log
+        # Build children_ / distances_ arrays for scipy dendrogram compatibility
         n = len(self._X)
         self.n_leaves_ = n
 
@@ -904,7 +928,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
                 children_list.append([id_map[a], id_map[b]])
                 distances_list.append(pad_dist)
                 id_map[a] = new_id
-                remaining_ids = [a] + remaining_ids[2:]
+                remaining_ids = [a, *remaining_ids[2:]]
                 pad_dist *= 1.5
 
         self.children_ = np.array(children_list, dtype=int).reshape(-1, 2)
@@ -921,7 +945,7 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
 
         check_is_fitted(self)
         sizes: list[int] = []
-        for (c1, c2), d in zip(self.children_, self.distances_):
+        for (c1, c2), _d in zip(self.children_, self.distances_, strict=True):
             s1 = 1 if c1 < self.n_leaves_ else sizes[c1 - self.n_leaves_]
             s2 = 1 if c2 < self.n_leaves_ else sizes[c2 - self.n_leaves_]
             sizes.append(s1 + s2)

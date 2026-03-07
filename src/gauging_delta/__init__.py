@@ -8,6 +8,8 @@ from gauging_delta.linkage import DefaultLinkage
 from gauging_delta.proximity import DefaultProximity
 
 
+__version__ = "0.1.0"
+
 __all__ = [
     "Cluster",
     "DefaultContinuity",
