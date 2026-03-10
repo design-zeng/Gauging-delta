@@ -34,12 +34,44 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
-import scienceplots  # noqa: F401 — required for scientific style
 from scipy.optimize import curve_fit
 
 
 matplotlib.use("Agg")
-plt.style.use(["science", "no-latex", "grid"])
+
+# Minimal Tufte-inspired style — no grid, no top/right spines, sans-serif.
+plt.rcParams.update({
+    "axes.spines.top": False,
+    "axes.spines.right": False,
+    "axes.grid": False,
+    "axes.linewidth": 0.8,
+    "axes.edgecolor": "#333333",
+    "axes.labelcolor": "#333333",
+    "font.family": "sans-serif",
+    "font.sans-serif": ["Helvetica Neue", "Arial", "DejaVu Sans"],
+    "font.size": 11,
+    "axes.titlesize": 13,
+    "axes.labelsize": 12,
+    "xtick.direction": "out",
+    "ytick.direction": "out",
+    "xtick.major.size": 4,
+    "ytick.major.size": 4,
+    "xtick.color": "#333333",
+    "ytick.color": "#333333",
+    "xtick.labelsize": 10,
+    "ytick.labelsize": 10,
+    "text.color": "#333333",
+    "lines.linewidth": 2.0,
+    "lines.markersize": 6,
+    "legend.frameon": False,
+    "legend.fontsize": 10,
+    "figure.facecolor": "white",
+    "figure.dpi": 150,
+    "savefig.dpi": 200,
+    "savefig.transparent": True,
+    "savefig.bbox": "tight",
+    "savefig.pad_inches": 0.15,
+})
 
 ROOT = Path(__file__).resolve().parent.parent
 ASSETS_DIR = ROOT / "assets"
@@ -337,17 +369,47 @@ def fmt_mem(b):
 
 
 # ---------------------------------------------------------------------------
-# Plotting (1×3 panels)
+# Plotting (3 separate figures — Tufte-minimal style)
 # ---------------------------------------------------------------------------
+
+# Okabe-Ito: blue + orange for max perceptual distance; vermillion for ceiling
+COLOR_FULL = "#0072B2"
+COLOR_LITE = "#E69F00"
+COLOR_DIST = "#0072B2"
+COLOR_CLUST = "#D55E00"
+COLOR_CEIL = "#D55E00"
+COLOR_REF = "#cccccc"
+
+
+def _save_fig(fig, name):
+    """Save a figure to assets/ and close it."""
+    ASSETS_DIR.mkdir(exist_ok=True)
+    out = ASSETS_DIR / name
+    fig.savefig(out, bbox_inches="tight")
+    plt.close(fig)
+    print(f"Saved plot \u2192 {out}")
+
+
+def _add_time_refs(ax):
+    """Add faint reference lines at 1 s and 1 min."""
+    for val, label in [(1, "1 s"), (60, "1 min")]:
+        ax.axhline(val, color=COLOR_REF, linewidth=0.6, zorder=0)
+        ax.text(
+            ax.get_xlim()[0] * 1.3, val * 1.15, label,
+            fontsize=7, color="#999999", va="bottom",
+        )
+
+
+def _label_at_end(ax, x, y, text, color, offset=(1.08, 1.0)):
+    """Place a direct label at the end of a line."""
+    ax.text(
+        x * offset[0], y * offset[1], text,
+        fontsize=9, color=color, va="center", fontstyle="italic",
+    )
 
 
 def plot_results(full_res, lite_res, fits):
-    """Generate 1×3 panel plot and save to assets/."""
-    # Colorblind-safe palette (Okabe-Ito)
-    COLOR_FULL = "#0072B2"
-    COLOR_LITE = "#009E73"
-    COLOR_CEIL = "#D55E00"
-
+    """Generate 3 separate scaling plots and save to assets/."""
     full_ns = np.array([r["n"] for r in full_res], dtype=float)
     lite_ns = np.array([r["n"] for r in lite_res], dtype=float)
 
@@ -364,216 +426,190 @@ def plot_results(full_res, lite_res, fits):
     full_med_m = np.array([r["med_mem"] for r in full_res])
     lite_med_m = np.array([r["med_mem"] for r in lite_res])
 
-    extrap_max = max(full_ns[-1], lite_ns[-1])
-    extrap_ns = np.logspace(np.log10(extrap_max), np.log10(100_000), 60)
+    # Per-mode extrapolation ranges — each starts from its own last measured point
+    extrap_end = 100_000
+    full_extrap = np.concatenate([
+        [full_ns[-1]],
+        np.logspace(np.log10(full_ns[-1]) + 0.01, np.log10(extrap_end), 50),
+    ])
+    lite_extrap = np.concatenate([
+        [lite_ns[-1]],
+        np.logspace(np.log10(lite_ns[-1]) + 0.01, np.log10(extrap_end), 50),
+    ])
 
-    fig, (ax1, ax2, ax3) = plt.subplots(1, 3, figsize=(18, 6))
+    n_gen = len(_GENERATORS)
+    footnote = f"median over {N_EXAMPLES} runs \u00d7 {n_gen} generators per N"
+    DASH = (0, (6, 3))
 
-    # === Panel 1: Runtime Scaling ===
+    # ================================================================
+    # Figure 1: Runtime Scaling
+    # ================================================================
+    fig1, ax1 = plt.subplots(figsize=(7, 4.5))
     fa_t, fb_t, fr2_t = fits["full_time"]
     la_t, lb_t, lr2_t = fits["lite_time"]
 
-    # Measured data with ±1σ shaded bands
-    ax1.plot(full_ns, full_med_t, "o-", color=COLOR_FULL, markersize=5, linewidth=1.3)
-    ax1.fill_between(
-        full_ns,
-        np.maximum(full_med_t - full_std_t, 1e-6),
-        full_med_t + full_std_t,
-        alpha=0.15,
-        color=COLOR_FULL,
-        label=r"Full mode $\tilde{x} \pm \sigma$",
+    # Measured data with error bars
+    ax1.errorbar(
+        full_ns, full_med_t, yerr=full_std_t,
+        fmt="o-", color=COLOR_FULL, capsize=3, capthick=1, markersize=5,
+        linewidth=2, label="Full mode",
     )
-    ax1.plot(lite_ns, lite_med_t, "s-", color=COLOR_LITE, markersize=5, linewidth=1.3)
-    ax1.fill_between(
-        lite_ns,
-        np.maximum(lite_med_t - lite_std_t, 1e-6),
-        lite_med_t + lite_std_t,
-        alpha=0.15,
-        color=COLOR_LITE,
-        label=r"Lite mode $\tilde{x} \pm \sigma$",
+    ax1.errorbar(
+        lite_ns, lite_med_t, yerr=lite_std_t,
+        fmt="s-", color=COLOR_LITE, capsize=3, capthick=1, markersize=5,
+        linewidth=2, label="Lite mode",
     )
 
-    # Power-law extrapolations
+    # Power-law extrapolation dashes (per-mode, no gap)
     ax1.loglog(
-        extrap_ns,
-        power_law(extrap_ns, fa_t, fb_t),
-        "--",
-        color=COLOR_FULL,
-        alpha=0.5,
-        linewidth=1,
-        label=f"Full fit $O(N^{{{fb_t:.2f}}})$  $R^2\\!={fr2_t:.3f}$",
+        full_extrap, power_law(full_extrap, fa_t, fb_t),
+        linestyle=DASH, color=COLOR_FULL, alpha=0.6, linewidth=1.5,
     )
     ax1.loglog(
-        extrap_ns,
-        power_law(extrap_ns, la_t, lb_t),
-        "--",
-        color=COLOR_LITE,
-        alpha=0.5,
-        linewidth=1,
-        label=f"Lite fit $O(N^{{{lb_t:.2f}}})$  $R^2\\!={lr2_t:.3f}$",
+        lite_extrap, power_law(lite_extrap, la_t, lb_t),
+        linestyle=DASH, color=COLOR_LITE, alpha=0.6, linewidth=1.5,
     )
+
     ax1.set_xscale("log")
     ax1.set_yscale("log")
-    ax1.set_xlabel("$N$")
-    ax1.set_ylabel("Runtime (s)")
-    ax1.set_title("Runtime Scaling", fontsize=12)
-    ax1.legend(fontsize=8, loc="upper left", framealpha=0.9)
+    ax1.set_xlabel("N (points)")
+    ax1.set_ylabel("Runtime (seconds)")
+    ax1.set_title("Runtime Scaling")
+    ax1.legend(loc="upper left")
+    _add_time_refs(ax1)
 
-    # === Panel 2: Full Mode Time Split (stacked area + uncertainty) ===
-    _fa_d, fb_d, fr2_d = fits["full_dist"]
-    _fa_c, fb_c, fr2_c = fits["full_cluster"]
-
-    full_total_top = full_med_dist + full_med_clust
-
-    # Stacked area fills
-    ax2.fill_between(
-        full_ns,
-        0,
-        full_med_dist,
-        alpha=0.25,
-        color=COLOR_FULL,
+    # Direct fit labels near extrapolation ends
+    _label_at_end(
+        ax1, full_extrap[-1], power_law(full_extrap[-1], fa_t, fb_t),
+        f"$O(N^{{{fb_t:.2f}}})$", COLOR_FULL,
     )
-    ax2.fill_between(
-        full_ns,
-        full_med_dist,
-        full_total_top,
-        alpha=0.25,
-        color=COLOR_LITE,
+    _label_at_end(
+        ax1, lite_extrap[-1], power_law(lite_extrap[-1], la_t, lb_t),
+        f"$O(N^{{{lb_t:.2f}}})$", COLOR_LITE,
     )
 
-    # Median lines with markers
-    ax2.plot(
-        full_ns,
-        full_med_dist,
-        "o-",
-        color=COLOR_FULL,
-        markersize=5,
-        linewidth=1.3,
-        label=f"Distance init $O(N^{{{fb_d:.2f}}})$  $R^2\\!={fr2_d:.3f}$",
+    fig1.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig1.tight_layout()
+    _save_fig(fig1, "scaling_runtime.png")
+
+    # ================================================================
+    # Figure 2: Full Mode Time Split
+    # ================================================================
+    fig2, ax2 = plt.subplots(figsize=(7, 4.5))
+    fa_d, fb_d, fr2_d = fits["full_dist"]
+    fa_c, fb_c, fr2_c = fits["full_cluster"]
+
+    # Measured data with error bars
+    ax2.errorbar(
+        full_ns, full_med_dist, yerr=full_std_dist,
+        fmt="o-", color=COLOR_DIST, capsize=3, capthick=1, markersize=5,
+        linewidth=2, label="Distance init",
     )
-    ax2.plot(
-        full_ns,
-        full_total_top,
-        "s-",
-        color=COLOR_LITE,
-        markersize=5,
-        linewidth=1.3,
-        label=f"+ Clustering $O(N^{{{fb_c:.2f}}})$  $R^2\\!={fr2_c:.3f}$",
+    ax2.errorbar(
+        full_ns, full_med_clust, yerr=full_std_clust,
+        fmt="s-", color=COLOR_CLUST, capsize=3, capthick=1, markersize=5,
+        linewidth=2, label="Clustering",
     )
 
-    # ±1σ uncertainty bands on each boundary
-    ax2.fill_between(
-        full_ns,
-        np.maximum(full_med_dist - full_std_dist, 1e-6),
-        full_med_dist + full_std_dist,
-        alpha=0.12,
-        color=COLOR_FULL,
+    # Power-law extrapolation dashes — shows crossover at ~N=42K
+    ax2.loglog(
+        full_extrap, power_law(full_extrap, fa_d, fb_d),
+        linestyle=DASH, color=COLOR_DIST, alpha=0.6, linewidth=1.5,
     )
-    # Combined uncertainty on the top boundary: σ_total = sqrt(σ_dist² + σ_clust²)
-    std_top = np.sqrt(full_std_dist**2 + full_std_clust**2)
-    ax2.fill_between(
-        full_ns,
-        np.maximum(full_total_top - std_top, 1e-6),
-        full_total_top + std_top,
-        alpha=0.12,
-        color=COLOR_LITE,
+    ax2.loglog(
+        full_extrap, power_law(full_extrap, fa_c, fb_c),
+        linestyle=DASH, color=COLOR_CLUST, alpha=0.6, linewidth=1.5,
     )
 
     ax2.set_xscale("log")
     ax2.set_yscale("log")
-    ax2.set_xlabel("$N$")
-    ax2.set_ylabel("Runtime (s)")
-    ax2.set_title("Full Mode: Time Split", fontsize=12)
-    ax2.legend(fontsize=8, loc="upper left", framealpha=0.9)
+    ax2.set_xlabel("N (points)")
+    ax2.set_ylabel("Runtime (seconds)")
+    ax2.set_title("Full Mode: Time Split")
+    ax2.legend(loc="upper left")
+    _add_time_refs(ax2)
 
-    # Annotation: what precomputed users skip
-    mid = len(full_ns) // 2
-    ax2.annotate(
-        "precomputed users\nskip this region",
-        xy=(full_ns[mid], full_med_dist[mid]),
-        xytext=(full_ns[max(mid - 2, 0)], full_med_dist[mid] * 0.15),
-        fontsize=8,
-        color=COLOR_FULL,
-        fontstyle="italic",
-        arrowprops={"arrowstyle": "->", "color": COLOR_FULL, "lw": 0.8},
+    # Direct fit labels at extrapolation ends
+    _label_at_end(
+        ax2, full_extrap[-1], power_law(full_extrap[-1], fa_d, fb_d),
+        f"$O(N^{{{fb_d:.2f}}})$", COLOR_DIST,
+    )
+    _label_at_end(
+        ax2, full_extrap[-1], power_law(full_extrap[-1], fa_c, fb_c),
+        f"$O(N^{{{fb_c:.2f}}})$", COLOR_CLUST,
     )
 
-    # === Panel 3: Memory Scaling ===
+    fig2.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig2.tight_layout()
+    _save_fig(fig2, "scaling_timesplit.png")
+
+    # ================================================================
+    # Figure 3: Memory Scaling
+    # ================================================================
+    fig3, ax3 = plt.subplots(figsize=(7, 4.5))
     fa_m, fb_m, fr2_m = fits["full_mem"]
     la_m, lb_m, lr2_m = fits["lite_mem"]
 
     full_med_m_mb = full_med_m / 1e6
     lite_med_m_mb = lite_med_m / 1e6
 
-    # Memory is deterministic (std ≈ 0), so plot without bands
+    # Measured data (memory is near-deterministic, no error bars needed)
     ax3.plot(
-        full_ns,
-        full_med_m_mb,
-        "o-",
-        color=COLOR_FULL,
-        markersize=5,
-        linewidth=1.3,
-        label=r"Full mode",
+        full_ns, full_med_m_mb, "o-", color=COLOR_FULL, markersize=5,
+        linewidth=2, label="Full mode",
     )
     ax3.plot(
-        lite_ns,
-        lite_med_m_mb,
-        "s-",
-        color=COLOR_LITE,
-        markersize=5,
-        linewidth=1.3,
-        label=r"Lite mode",
+        lite_ns, lite_med_m_mb, "s-", color=COLOR_LITE, markersize=5,
+        linewidth=2, label="Lite mode",
     )
 
-    # Power-law extrapolations
+    # Power-law extrapolation dashes (per-mode, no gap)
     ax3.loglog(
-        extrap_ns,
-        power_law(extrap_ns, fa_m, fb_m) / 1e6,
-        "--",
-        color=COLOR_FULL,
-        alpha=0.5,
-        linewidth=1,
-        label=f"Full fit $O(N^{{{fb_m:.2f}}})$  $R^2\\!={fr2_m:.3f}$",
+        full_extrap, power_law(full_extrap, fa_m, fb_m) / 1e6,
+        linestyle=DASH, color=COLOR_FULL, alpha=0.6, linewidth=1.5,
     )
     ax3.loglog(
-        extrap_ns,
-        power_law(extrap_ns, la_m, lb_m) / 1e6,
-        "--",
-        color=COLOR_LITE,
-        alpha=0.5,
-        linewidth=1,
-        label=f"Lite fit $O(N^{{{lb_m:.2f}}})$  $R^2\\!={lr2_m:.3f}$",
+        lite_extrap, power_law(lite_extrap, la_m, lb_m) / 1e6,
+        linestyle=DASH, color=COLOR_LITE, alpha=0.6, linewidth=1.5,
     )
+
+    # 64 GB ceiling
     ax3.axhline(
-        64_000,
-        color=COLOR_CEIL,
-        linewidth=1.0,
-        linestyle=":",
-        alpha=0.85,
-        label="64 GB",
+        64_000, color=COLOR_CEIL, linewidth=1.2, linestyle=":", alpha=0.85,
     )
+    ax3.text(
+        full_ns[0] * 1.3, 64_000 * 1.15, "64 GB",
+        fontsize=9, color=COLOR_CEIL, va="bottom",
+    )
+
     ax3.set_xscale("log")
     ax3.set_yscale("log")
-    ax3.set_xlabel("$N$")
+    ax3.set_xlabel("N (points)")
     ax3.set_ylabel("Peak Memory (MB)")
-    ax3.set_title("Memory Scaling", fontsize=12)
-    ax3.legend(fontsize=8, loc="upper left", framealpha=0.9)
+    ax3.set_title("Memory Scaling")
+    ax3.legend(loc="upper left")
 
-    # === Figure-level ===
-    n_generators = len(_GENERATORS)
-    fig.suptitle(
-        f"Gauging-$\\delta$ Scaling"
-        f"  ({n_generators} generators"
-        f" $\\times$ {N_EXAMPLES} examples/cell"
-        f"$\\;\\cdot\\;$ shaded = $\\pm 1\\sigma$)",
-        fontsize=12,
+    # Reference lines at key memory values
+    for val, label in [(1000, "1 GB"), (10_000, "10 GB")]:
+        ax3.axhline(val, color=COLOR_REF, linewidth=0.6, zorder=0)
+        ax3.text(
+            full_ns[0] * 1.3, val * 1.15, label,
+            fontsize=7, color="#999999", va="bottom",
+        )
+
+    # Direct fit labels near extrapolation ends
+    _label_at_end(
+        ax3, full_extrap[-1], power_law(full_extrap[-1], fa_m, fb_m) / 1e6,
+        f"$O(N^{{{fb_m:.2f}}})$", COLOR_FULL,
     )
-    fig.tight_layout()
-    ASSETS_DIR.mkdir(exist_ok=True)
-    out = ASSETS_DIR / "scaling_benchmark.png"
-    fig.savefig(out, dpi=250, bbox_inches="tight")
-    plt.close(fig)
-    print(f"\nSaved plot \u2192 {out}")
+    _label_at_end(
+        ax3, lite_extrap[-1], power_law(lite_extrap[-1], la_m, lb_m) / 1e6,
+        f"$O(N^{{{lb_m:.2f}}})$", COLOR_LITE,
+    )
+
+    fig3.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig3.tight_layout()
+    _save_fig(fig3, "scaling_memory.png")
 
 
 # ---------------------------------------------------------------------------

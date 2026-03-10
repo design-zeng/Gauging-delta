@@ -93,6 +93,9 @@ model = GaugingDelta(metric=lambda u, v: np.sum(np.abs(u - v))).fit(X)
 
 The `metric` parameter works in both full and lite modes.
 
+<details>
+<summary>More examples: precomputed matrices, continuity gate, DataFrames</summary>
+
 ### Disable continuity gate
 
 ```python
@@ -132,13 +135,13 @@ df = pd.DataFrame({"x": [1, 3, 10, 12], "y": [2, 4, 11, 13]})
 labels = GaugingDelta().fit_predict(df)
 ```
 
+</details>
+
 ## Scaling
 
-<div align="center">
+![Runtime scaling for full and lite modes](assets/scaling_runtime.png)
 
-![Runtime and memory scaling for full and lite modes](assets/scaling_benchmark.png)
-
-</div>
+![Memory scaling for full and lite modes](assets/scaling_memory.png)
 
 |  | Runtime | Space |
 |---|---|---|
@@ -146,9 +149,27 @@ labels = GaugingDelta().fit_predict(df)
 | **Core algorithm** | O(N^1.19) | — |
 | **Core algorithm (lite)** | O(N^1.65) | O(N) |
 
-Full mode total runtime is dominated by the distance matrix at large N.
-Users who supply a precomputed distance matrix (`metric="precomputed"`) skip
-the distance-init phase entirely — their runtime is the "core algorithm" row only.
+Full mode runtime is dominated by the O(N²) distance matrix at large N.
+Users who supply a precomputed matrix (`metric="precomputed"`) skip this phase —
+their runtime follows the "core algorithm" row only. For large datasets, GPU-accelerated
+distance computation (e.g., cuML, RAPIDS) can significantly reduce this bottleneck
+before passing the result to Gauging-δ.
+
+Full mode memory is also O(N²) — exceeds 64 GB around N ≈ 35K.
+Lite mode is O(N) in both time and space, scaling to millions of points on commodity hardware.
+
+<details>
+<summary>Full mode time split</summary>
+
+![Full mode time split: distance init vs clustering](assets/scaling_timesplit.png)
+
+At N ≈ 40K the distance-init phase overtakes clustering as the dominant cost.
+Precomputed or GPU-accelerated distance matrices eliminate this bottleneck entirely.
+
+</details>
+
+<details>
+<summary>Projected numbers</summary>
 
 | N | Full total | (dist init) | Full memory | Lite total | Lite memory |
 |---:|---:|---:|---:|---:|---:|
@@ -165,12 +186,11 @@ the distance-init phase entirely — their runtime is the "core algorithm" row o
 
 Rows up to N=15,000 (full) and N=50,000 (lite) are measured (median ± std over
 30 runs across 7 dataset generators). Larger rows are power-law extrapolations
-(R² > 0.998).¹
+(R² > 0.998).
 
-Full mode memory is O(N²) — exceeds 64 GB at N ≈ 35K.
-Lite mode memory is O(N) — feasible to millions of points on commodity hardware.
+<sub>Benchmarked on 10-core ARM SoC (4P + 6E), 32 GB unified memory.</sub>
 
-<sub>¹ Benchmarked on 10-core ARM SoC (4P + 6E), 32 GB unified memory.</sub>
+</details>
 
 ## Modes
 
@@ -185,7 +205,7 @@ Lite mode memory is O(N) — feasible to millions of points on commodity hardwar
 | **Use when** | Quality matters | Scale or memory matters |
 
 The `mode` parameter bundles linkage and continuity defaults. You can
-override continuity independently — see [Disable continuity gate](#disable-continuity-gate).
+override continuity independently with `GaugingDelta(continuity=False)`.
 
 > Lite mode trades clustering quality for O(N) memory. It is best suited for
 > large-scale exploratory analysis where approximate clusters are acceptable.
@@ -258,7 +278,7 @@ These accept Protocol-compatible objects. See `src/gauging_delta/_types.py` for 
 
 ### Dendrogram
 
-> Requires matplotlib: `uv add gauging-delta[bench]`
+> Requires matplotlib: `uv sync --all-extras`
 
 ```python
 from scipy.cluster.hierarchy import dendrogram
