@@ -20,7 +20,11 @@ angle-based continuity analysis.
 
 <div align="center">
 
-![Gauging-δ clustering on jain, flame, and 3-spiral datasets](assets/readme_plot.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/readme_plot_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/readme_plot_light.png">
+  <img alt="Gauging-δ clustering on jain, flame, and 3-spiral datasets" src="assets/readme_plot_light.png">
+</picture>
 
 </div>
 
@@ -139,9 +143,17 @@ labels = GaugingDelta().fit_predict(df)
 
 ## Scaling
 
-![Runtime scaling for full and lite modes](assets/scaling_runtime.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/scaling_runtime_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/scaling_runtime_light.png">
+  <img alt="Runtime scaling for full and lite modes" src="assets/scaling_runtime_light.png">
+</picture>
 
-![Memory scaling for full and lite modes](assets/scaling_memory.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/scaling_memory_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/scaling_memory_light.png">
+  <img alt="Memory scaling for full and lite modes" src="assets/scaling_memory_light.png">
+</picture>
 
 |  | Runtime | Space |
 |---|---|---|
@@ -161,7 +173,11 @@ Lite mode is O(N) in both time and space, scaling to millions of points on commo
 <details>
 <summary>Full mode time split</summary>
 
-![Full mode time split: distance init vs clustering](assets/scaling_timesplit.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/scaling_timesplit_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/scaling_timesplit_light.png">
+  <img alt="Full mode time split: distance init vs clustering" src="assets/scaling_timesplit_light.png">
+</picture>
 
 At N ≈ 40K the distance-init phase overtakes clustering as the dominant cost.
 Precomputed or GPU-accelerated distance matrices eliminate this bottleneck entirely.
@@ -291,7 +307,11 @@ plt.show()
 
 <div align="center">
 
-![Dendrogram and cluster scatter plot on flame dataset](assets/dendrogram.png)
+<picture>
+  <source media="(prefers-color-scheme: dark)" srcset="assets/dendrogram_dark.png">
+  <source media="(prefers-color-scheme: light)" srcset="assets/dendrogram_light.png">
+  <img alt="Dendrogram and cluster scatter plot on flame dataset" src="assets/dendrogram_light.png">
+</picture>
 
 </div>
 

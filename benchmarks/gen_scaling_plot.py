@@ -1,4 +1,4 @@
-"""Generate assets/scaling_benchmark.png for the README.
+"""Generate assets/scaling_{runtime,memory,timesplit}_{light,dark}.png for the README.
 
 Runs GaugingDelta (full and lite modes) across diverse randomly-parameterized
 datasets. 30 examples per (N, mode) cell using 7 weighted generators.
@@ -16,11 +16,12 @@ Dataset generators (Hypothesis-inspired, deterministically seeded):
   bench_collinear — Clusters along a line (weight 1)
 
 Usage:
-    uv run python benchmarks/gen_scaling_plot.py
+    uv run python benchmarks/gen_scaling_plot.py [--theme light|dark|both]
 """
 
 from __future__ import annotations
 
+import argparse
 import gc
 import json
 import random
@@ -34,6 +35,7 @@ from pathlib import Path
 import matplotlib
 import matplotlib.pyplot as plt
 import numpy as np
+from _plotting import apply_theme
 from scipy.optimize import curve_fit
 
 
@@ -369,34 +371,27 @@ def fmt_mem(b):
 
 
 # ---------------------------------------------------------------------------
-# Plotting (3 separate figures — Tufte-minimal style)
+# Plotting (3 separate figures — Catppuccin Mocha/Latte themed)
 # ---------------------------------------------------------------------------
 
-# Okabe-Ito: blue + orange for max perceptual distance; vermillion for ceiling
-COLOR_FULL = "#0072B2"
-COLOR_LITE = "#E69F00"
-COLOR_DIST = "#0072B2"
-COLOR_CLUST = "#D55E00"
-COLOR_CEIL = "#D55E00"
-COLOR_REF = "#cccccc"
 
-
-def _save_fig(fig, name):
-    """Save a figure to assets/ and close it."""
+def _save_fig(fig, name, theme):
+    """Save a figure to assets/ with theme suffix and close it."""
     ASSETS_DIR.mkdir(exist_ok=True)
-    out = ASSETS_DIR / name
+    stem, ext = name.rsplit(".", 1)
+    out = ASSETS_DIR / f"{stem}_{theme}.{ext}"
     fig.savefig(out, bbox_inches="tight")
     plt.close(fig)
     print(f"Saved plot \u2192 {out}")
 
 
-def _add_time_refs(ax):
+def _add_time_refs(ax, tc):
     """Add faint reference lines at 1 s and 1 min."""
     for val, label in [(1, "1 s"), (60, "1 min")]:
-        ax.axhline(val, color=COLOR_REF, linewidth=0.6, zorder=0)
+        ax.axhline(val, color=tc.ref_line, linewidth=0.6, zorder=0)
         ax.text(
             ax.get_xlim()[0] * 1.3, val * 1.15, label,
-            fontsize=7, color="#999999", va="bottom",
+            fontsize=7, color=tc.ref_text, va="bottom",
         )
 
 
@@ -408,8 +403,10 @@ def _label_at_end(ax, x, y, text, color, offset=(1.08, 1.0)):
     )
 
 
-def plot_results(full_res, lite_res, fits):
-    """Generate 3 separate scaling plots and save to assets/."""
+def plot_results(full_res, lite_res, fits, theme="light"):
+    """Generate 3 separate scaling plots for one theme and save to assets/."""
+    tc = apply_theme(theme)
+
     full_ns = np.array([r["n"] for r in full_res], dtype=float)
     lite_ns = np.array([r["n"] for r in lite_res], dtype=float)
 
@@ -445,29 +442,29 @@ def plot_results(full_res, lite_res, fits):
     # Figure 1: Runtime Scaling
     # ================================================================
     fig1, ax1 = plt.subplots(figsize=(7, 4.5))
-    fa_t, fb_t, fr2_t = fits["full_time"]
-    la_t, lb_t, lr2_t = fits["lite_time"]
+    fa_t, fb_t, _fr2_t = fits["full_time"]
+    la_t, lb_t, _lr2_t = fits["lite_time"]
 
     # Measured data with error bars
     ax1.errorbar(
         full_ns, full_med_t, yerr=full_std_t,
-        fmt="o-", color=COLOR_FULL, capsize=3, capthick=1, markersize=5,
+        fmt="o-", color=tc.full, capsize=3, capthick=1, markersize=5,
         linewidth=2, label="Full mode",
     )
     ax1.errorbar(
         lite_ns, lite_med_t, yerr=lite_std_t,
-        fmt="s-", color=COLOR_LITE, capsize=3, capthick=1, markersize=5,
+        fmt="s-", color=tc.lite, capsize=3, capthick=1, markersize=5,
         linewidth=2, label="Lite mode",
     )
 
     # Power-law extrapolation dashes (per-mode, no gap)
     ax1.loglog(
         full_extrap, power_law(full_extrap, fa_t, fb_t),
-        linestyle=DASH, color=COLOR_FULL, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.full, alpha=0.6, linewidth=1.5,
     )
     ax1.loglog(
         lite_extrap, power_law(lite_extrap, la_t, lb_t),
-        linestyle=DASH, color=COLOR_LITE, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.lite, alpha=0.6, linewidth=1.5,
     )
 
     ax1.set_xscale("log")
@@ -476,49 +473,49 @@ def plot_results(full_res, lite_res, fits):
     ax1.set_ylabel("Runtime (seconds)")
     ax1.set_title("Runtime Scaling")
     ax1.legend(loc="upper left")
-    _add_time_refs(ax1)
+    _add_time_refs(ax1, tc)
 
     # Direct fit labels near extrapolation ends
     _label_at_end(
         ax1, full_extrap[-1], power_law(full_extrap[-1], fa_t, fb_t),
-        f"$O(N^{{{fb_t:.2f}}})$", COLOR_FULL,
+        f"$O(N^{{{fb_t:.2f}}})$", tc.full,
     )
     _label_at_end(
         ax1, lite_extrap[-1], power_law(lite_extrap[-1], la_t, lb_t),
-        f"$O(N^{{{lb_t:.2f}}})$", COLOR_LITE,
+        f"$O(N^{{{lb_t:.2f}}})$", tc.lite,
     )
 
-    fig1.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig1.text(0.5, -0.02, footnote, ha="center", fontsize=8, color=tc.footnote)
     fig1.tight_layout()
-    _save_fig(fig1, "scaling_runtime.png")
+    _save_fig(fig1, "scaling_runtime.png", theme)
 
     # ================================================================
     # Figure 2: Full Mode Time Split
     # ================================================================
     fig2, ax2 = plt.subplots(figsize=(7, 4.5))
-    fa_d, fb_d, fr2_d = fits["full_dist"]
-    fa_c, fb_c, fr2_c = fits["full_cluster"]
+    fa_d, fb_d, _fr2_d = fits["full_dist"]
+    fa_c, fb_c, _fr2_c = fits["full_cluster"]
 
     # Measured data with error bars
     ax2.errorbar(
         full_ns, full_med_dist, yerr=full_std_dist,
-        fmt="o-", color=COLOR_DIST, capsize=3, capthick=1, markersize=5,
+        fmt="o-", color=tc.dist, capsize=3, capthick=1, markersize=5,
         linewidth=2, label="Distance init",
     )
     ax2.errorbar(
         full_ns, full_med_clust, yerr=full_std_clust,
-        fmt="s-", color=COLOR_CLUST, capsize=3, capthick=1, markersize=5,
+        fmt="s-", color=tc.lite, capsize=3, capthick=1, markersize=5,
         linewidth=2, label="Clustering",
     )
 
     # Power-law extrapolation dashes — shows crossover at ~N=42K
     ax2.loglog(
         full_extrap, power_law(full_extrap, fa_d, fb_d),
-        linestyle=DASH, color=COLOR_DIST, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.dist, alpha=0.6, linewidth=1.5,
     )
     ax2.loglog(
         full_extrap, power_law(full_extrap, fa_c, fb_c),
-        linestyle=DASH, color=COLOR_CLUST, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.lite, alpha=0.6, linewidth=1.5,
     )
 
     ax2.set_xscale("log")
@@ -527,59 +524,59 @@ def plot_results(full_res, lite_res, fits):
     ax2.set_ylabel("Runtime (seconds)")
     ax2.set_title("Full Mode: Time Split")
     ax2.legend(loc="upper left")
-    _add_time_refs(ax2)
+    _add_time_refs(ax2, tc)
 
     # Direct fit labels at extrapolation ends
     _label_at_end(
         ax2, full_extrap[-1], power_law(full_extrap[-1], fa_d, fb_d),
-        f"$O(N^{{{fb_d:.2f}}})$", COLOR_DIST,
+        f"$O(N^{{{fb_d:.2f}}})$", tc.dist,
     )
     _label_at_end(
         ax2, full_extrap[-1], power_law(full_extrap[-1], fa_c, fb_c),
-        f"$O(N^{{{fb_c:.2f}}})$", COLOR_CLUST,
+        f"$O(N^{{{fb_c:.2f}}})$", tc.lite,
     )
 
-    fig2.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig2.text(0.5, -0.02, footnote, ha="center", fontsize=8, color=tc.footnote)
     fig2.tight_layout()
-    _save_fig(fig2, "scaling_timesplit.png")
+    _save_fig(fig2, "scaling_timesplit.png", theme)
 
     # ================================================================
     # Figure 3: Memory Scaling
     # ================================================================
     fig3, ax3 = plt.subplots(figsize=(7, 4.5))
-    fa_m, fb_m, fr2_m = fits["full_mem"]
-    la_m, lb_m, lr2_m = fits["lite_mem"]
+    fa_m, fb_m, _fr2_m = fits["full_mem"]
+    la_m, lb_m, _lr2_m = fits["lite_mem"]
 
     full_med_m_mb = full_med_m / 1e6
     lite_med_m_mb = lite_med_m / 1e6
 
     # Measured data (memory is near-deterministic, no error bars needed)
     ax3.plot(
-        full_ns, full_med_m_mb, "o-", color=COLOR_FULL, markersize=5,
+        full_ns, full_med_m_mb, "o-", color=tc.full, markersize=5,
         linewidth=2, label="Full mode",
     )
     ax3.plot(
-        lite_ns, lite_med_m_mb, "s-", color=COLOR_LITE, markersize=5,
+        lite_ns, lite_med_m_mb, "s-", color=tc.lite, markersize=5,
         linewidth=2, label="Lite mode",
     )
 
     # Power-law extrapolation dashes (per-mode, no gap)
     ax3.loglog(
         full_extrap, power_law(full_extrap, fa_m, fb_m) / 1e6,
-        linestyle=DASH, color=COLOR_FULL, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.full, alpha=0.6, linewidth=1.5,
     )
     ax3.loglog(
         lite_extrap, power_law(lite_extrap, la_m, lb_m) / 1e6,
-        linestyle=DASH, color=COLOR_LITE, alpha=0.6, linewidth=1.5,
+        linestyle=DASH, color=tc.lite, alpha=0.6, linewidth=1.5,
     )
 
     # 64 GB ceiling
     ax3.axhline(
-        64_000, color=COLOR_CEIL, linewidth=1.2, linestyle=":", alpha=0.85,
+        64_000, color=tc.ceil, linewidth=1.2, linestyle=":", alpha=0.85,
     )
     ax3.text(
         full_ns[0] * 1.3, 64_000 * 1.15, "64 GB",
-        fontsize=9, color=COLOR_CEIL, va="bottom",
+        fontsize=9, color=tc.ceil, va="bottom",
     )
 
     ax3.set_xscale("log")
@@ -591,25 +588,25 @@ def plot_results(full_res, lite_res, fits):
 
     # Reference lines at key memory values
     for val, label in [(1000, "1 GB"), (10_000, "10 GB")]:
-        ax3.axhline(val, color=COLOR_REF, linewidth=0.6, zorder=0)
+        ax3.axhline(val, color=tc.ref_line, linewidth=0.6, zorder=0)
         ax3.text(
             full_ns[0] * 1.3, val * 1.15, label,
-            fontsize=7, color="#999999", va="bottom",
+            fontsize=7, color=tc.ref_text, va="bottom",
         )
 
     # Direct fit labels near extrapolation ends
     _label_at_end(
         ax3, full_extrap[-1], power_law(full_extrap[-1], fa_m, fb_m) / 1e6,
-        f"$O(N^{{{fb_m:.2f}}})$", COLOR_FULL,
+        f"$O(N^{{{fb_m:.2f}}})$", tc.full,
     )
     _label_at_end(
         ax3, lite_extrap[-1], power_law(lite_extrap[-1], la_m, lb_m) / 1e6,
-        f"$O(N^{{{lb_m:.2f}}})$", COLOR_LITE,
+        f"$O(N^{{{lb_m:.2f}}})$", tc.lite,
     )
 
-    fig3.text(0.5, -0.02, footnote, ha="center", fontsize=8, color="#999999")
+    fig3.text(0.5, -0.02, footnote, ha="center", fontsize=8, color=tc.footnote)
     fig3.tight_layout()
-    _save_fig(fig3, "scaling_memory.png")
+    _save_fig(fig3, "scaling_memory.png", theme)
 
 
 # ---------------------------------------------------------------------------
@@ -702,46 +699,87 @@ def save_json(full_res, lite_res, fits):
 # ---------------------------------------------------------------------------
 
 
+def load_cached():
+    """Load results + fits from cached scaling_results.json if available."""
+    path = RESULTS_DIR / "scaling_results.json"
+    if not path.exists():
+        return None
+    data = json.loads(path.read_text())
+    full_res = data["full"]
+    lite_res = data["lite"]
+    fits = {k: (v["a"], v["b"], v["r2"]) for k, v in data["fits"].items()}
+    return full_res, lite_res, fits
+
+
 def main():
-    n_generators = len(_GENERATORS)
-    print("=" * 75)
-    print(f"Scaling benchmark  ({n_generators} generators \u00d7 {N_EXAMPLES} examples/cell)")
-    print(f"Full sizes: {FULL_SIZES}")
-    print(f"Lite sizes: {LITE_SIZES}")
-    print("=" * 75)
+    parser = argparse.ArgumentParser(description="Generate scaling plots for the README")
+    parser.add_argument(
+        "--theme",
+        choices=["light", "dark", "both"],
+        default="both",
+        help="Which Catppuccin theme(s) to generate (default: both)",
+    )
+    parser.add_argument(
+        "--plot-only",
+        action="store_true",
+        help="Skip benchmarking; regenerate plots from cached scaling_results.json",
+    )
+    args = parser.parse_args()
+    themes = ["light", "dark"] if args.theme == "both" else [args.theme]
 
-    # ── Full mode ──────────────────────────────────────────────────────────
-    print("\nFull mode:")
-    full_res = measure_split(FULL_SIZES, "full")
+    if args.plot_only:
+        cached = load_cached()
+        if cached is None:
+            print("No cached results found — run without --plot-only first.")
+            sys.exit(1)
+        full_res, lite_res, fits = cached
+        print(f"Loaded cached results from {RESULTS_DIR / 'scaling_results.json'}")
+    else:
+        n_generators = len(_GENERATORS)
+        print("=" * 75)
+        print(f"Scaling benchmark  ({n_generators} generators \u00d7 {N_EXAMPLES} examples/cell)")
+        print(f"Full sizes: {FULL_SIZES}")
+        print(f"Lite sizes: {LITE_SIZES}")
+        print("=" * 75)
 
-    # ── Lite mode ──────────────────────────────────────────────────────────
-    print("\nLite mode:")
-    lite_res = measure_split(LITE_SIZES, "lite")
+        # ── Full mode ──────────────────────────────────────────────────────
+        print("\nFull mode:")
+        full_res = measure_split(FULL_SIZES, "full")
 
-    # ── Fit power laws ─────────────────────────────────────────────────────
-    full_ns = [r["n"] for r in full_res]
-    lite_ns = [r["n"] for r in lite_res]
+        # ── Lite mode ──────────────────────────────────────────────────────
+        print("\nLite mode:")
+        lite_res = measure_split(LITE_SIZES, "lite")
 
-    fits = {
-        "full_time": fit_power(full_ns, [r["med_total"] for r in full_res]),
-        "full_dist": fit_power(full_ns, [r["med_dist"] for r in full_res]),
-        "full_cluster": fit_power(full_ns, [r["med_cluster"] for r in full_res]),
-        "full_mem": fit_power(full_ns, [r["med_mem"] for r in full_res]),
-        "lite_time": fit_power(lite_ns, [r["med_total"] for r in lite_res]),
-        "lite_mem": fit_power(lite_ns, [r["med_mem"] for r in lite_res]),
-    }
+        # ── Fit power laws ─────────────────────────────────────────────────
+        full_ns = [r["n"] for r in full_res]
+        lite_ns = [r["n"] for r in lite_res]
 
-    print(f"\nFull:  time O(N^{fits['full_time'][1]:.2f}) R\u00b2={fits['full_time'][2]:.4f}")
-    print(f"  dist-init O(N^{fits['full_dist'][1]:.2f}) R\u00b2={fits['full_dist'][2]:.4f}")
-    print(f"  clustering O(N^{fits['full_cluster'][1]:.2f}) R\u00b2={fits['full_cluster'][2]:.4f}")
-    print(f"  mem O(N^{fits['full_mem'][1]:.2f}) R\u00b2={fits['full_mem'][2]:.4f}")
-    print(f"Lite:  time O(N^{fits['lite_time'][1]:.2f}) R\u00b2={fits['lite_time'][2]:.4f}")
-    print(f"  mem O(N^{fits['lite_mem'][1]:.2f}) R\u00b2={fits['lite_mem'][2]:.4f}")
+        fits = {
+            "full_time": fit_power(full_ns, [r["med_total"] for r in full_res]),
+            "full_dist": fit_power(full_ns, [r["med_dist"] for r in full_res]),
+            "full_cluster": fit_power(full_ns, [r["med_cluster"] for r in full_res]),
+            "full_mem": fit_power(full_ns, [r["med_mem"] for r in full_res]),
+            "lite_time": fit_power(lite_ns, [r["med_total"] for r in lite_res]),
+            "lite_mem": fit_power(lite_ns, [r["med_mem"] for r in lite_res]),
+        }
+
+        print(f"\nFull:  time O(N^{fits['full_time'][1]:.2f}) R\u00b2={fits['full_time'][2]:.4f}")
+        print(f"  dist-init O(N^{fits['full_dist'][1]:.2f}) R\u00b2={fits['full_dist'][2]:.4f}")
+        print(
+            f"  clustering O(N^{fits['full_cluster'][1]:.2f})"
+            f" R\u00b2={fits['full_cluster'][2]:.4f}"
+        )
+        print(f"  mem O(N^{fits['full_mem'][1]:.2f}) R\u00b2={fits['full_mem'][2]:.4f}")
+        print(f"Lite:  time O(N^{fits['lite_time'][1]:.2f}) R\u00b2={fits['lite_time'][2]:.4f}")
+        print(f"  mem O(N^{fits['lite_mem'][1]:.2f}) R\u00b2={fits['lite_mem'][2]:.4f}")
+
+        print_table(full_res, lite_res, fits)
+        save_json(full_res, lite_res, fits)
 
     # ── Plot + output ──────────────────────────────────────────────────────
-    plot_results(full_res, lite_res, fits)
-    print_table(full_res, lite_res, fits)
-    save_json(full_res, lite_res, fits)
+    for theme in themes:
+        print(f"\nGenerating {theme} theme plots...")
+        plot_results(full_res, lite_res, fits, theme=theme)
 
 
 if __name__ == "__main__":
