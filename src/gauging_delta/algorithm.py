@@ -726,6 +726,29 @@ class GaugingDelta(ClusterMixin, BaseEstimator):
         self._near_ref[lead_id, winning] = child_ref_self[winning]
         self._near_ref[winning, lead_id] = child_ref_other[winning]
 
+        # Fix zero-distance ref points to match legacy iteration order.
+        # Lance-Williams preserves the earlier-established ref on ties, but legacy
+        # recomputes from scratch and finds the first d=0 pair in point_indices
+        # order. These can differ when a later-absorbed point appears earlier in
+        # the list. Only fires for zero-distance entries (duplicate points).
+        zero_cols = active[self._dist_matrix[lead_id, active] == 0.0]
+        if len(zero_cols) > 0:
+            lead_pts = lead.point_indices
+            X = self._X
+            for c in zero_cols:
+                c_pts = self._clusters[c].point_indices
+                found = False
+                for p1 in lead_pts:
+                    for p2 in c_pts:
+                        diff = X[p1] - X[p2]
+                        if float(diff @ diff) == 0.0:
+                            self._near_ref[lead_id, c] = p1
+                            self._near_ref[c, lead_id] = p2
+                            found = True
+                            break
+                    if found:
+                        break
+
         # Incrementally update row-wise minimum tracking arrays.
         # Only rescan rows that actually changed instead of a full O(N^2) scan.
 

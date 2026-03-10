@@ -5,7 +5,7 @@
 [![Python 3.13+](https://img.shields.io/badge/python-3.13+-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
 [![IEEE TPAMI 2025](https://img.shields.io/badge/IEEE_TPAMI-2025-blue.svg)](https://doi.org/10.1109/TPAMI.2025.3545573)
-[![tests](https://img.shields.io/badge/tests-125_passed-brightgreen.svg)](#)
+[![tests](https://img.shields.io/badge/tests-124_passed-brightgreen.svg)](#)
 [![sklearn](https://img.shields.io/badge/API-sklearn--compatible-F7931E?logo=scikit-learn&logoColor=white)](#api-reference)
 
 </div>
@@ -14,7 +14,9 @@
 determines the number of clusters. Instead of fixed distance thresholds, it evaluates
 merge candidates through *relative proximity* — inter-cluster distance normalized by
 historical merge patterns — and validates boundaries with adaptive thresholds and
-angle-based continuity analysis. 
+angle-based continuity analysis.
+
+> Published in [IEEE TPAMI 2025](https://doi.org/10.1109/TPAMI.2025.3545573) (Vol. 47, No. 6, pp. 4897–4907).
 
 <div align="center">
 
@@ -25,19 +27,7 @@ angle-based continuity analysis.
 ## Install
 
 ```bash
-pip install gauging-delta
-```
-
-Or with [uv](https://docs.astral.sh/uv/):
-
-```bash
-uv add gauging-delta
-```
-
-From source:
-
-```bash
-git clone https://github.com/design-zeng/Gauging-delta.git
+git clone -b refactor/time-space-complexity-optimization https://github.com/design-zeng/Gauging-delta.git
 cd Gauging-delta && uv sync
 ```
 
@@ -150,21 +140,37 @@ labels = GaugingDelta().fit_predict(df)
 
 </div>
 
-| N | Full time | Full memory | Lite time | Lite memory |
-|---:|---:|---:|---:|---:|
-| 5,000 | 13 s | 1.4 GB | 3 s | 5 MB |
-| 10,000 | 27 s | 5.8 GB | 8 s | 10 MB |
-| 20,000 | ~1 min | 22 GB | 17 s | 21 MB |
-| 35,000 | ~1.8 min | **64 GB** | 35 s | 37 MB |
-| 100,000 | ~6 min | 543 GB* | 2.1 min | 110 MB |
-| 500,000 | ~40 min | — | 13 min | 570 MB |
-| 1,000,000 | ~1.4 hr | — | 36 min | 1.2 GB |
+|  | Runtime | Space |
+|---|---|---|
+| **Distance matrix** | O(N^2.23) | O(N²) |
+| **Core algorithm** | O(N^1.19) | — |
+| **Core algorithm (lite)** | O(N^1.65) | O(N) |
 
-Runtime is projected from measured O(N^1.1) and O(N^1.2) power-law fits.
-Full mode memory is O(N^2) — exceeds 64 GB at N ≈ 35K.
-Lite mode memory is O(N) — exceeds 64 GB at N ≈ 48M.
+Full mode total runtime is dominated by the distance matrix at large N.
+Users who supply a precomputed distance matrix (`metric="precomputed"`) skip
+the distance-init phase entirely — their runtime is the "core algorithm" row only.
 
-*\* Full mode runtime projections beyond 35K assume infinite memory; in practice, memory is the bottleneck.*
+| N | Full total | (dist init) | Full memory | Lite total | Lite memory |
+|---:|---:|---:|---:|---:|---:|
+| 5,000 | 13.2 ± 0.8 s | 1.4 ± 0.1 s | 1.5 GB | 3.1 ± 0.3 s | 5 MB |
+| 10,000 | 32.5 ± 1.2 s | 6.6 ± 0.5 s | 6.0 GB | 7.6 ± 0.6 s | 11 MB |
+| 15,000 | 60.0 ± 2.8 s | 16.1 ± 1.5 s | 13.5 GB | 13.5 ± 0.7 s | 16 MB |
+| 20,000 | ~1.5 min | ~31 s | ~24 GB | 20.8 ± 0.7 s | 21 MB |
+| 30,000 | ~2.6 min | ~1.3 min | ~54 GB | 39.6 ± 1.6 s | 34 MB |
+| 35,000 | ~3.2 min | ~1.8 min | **~74 GB** | ~53 s | ~39 MB |
+| 50,000 | ~5.3 min | ~3.9 min | **~150 GB** | 95.4 ± 4.9 s | 55 MB |
+| 100,000 | ~14 min | ~19 min | **~599 GB** | ~5.0 min | ~113 MB |
+| 500,000 | ~2.2 hr | ~11.2 hr | **~14.9 TB** | ~70 min | ~583 MB |
+| 1,000,000 | ~5.7 hr | ~52.7 hr | **~59.7 TB** | ~3.7 hr | ~1.2 GB |
+
+Rows up to N=15,000 (full) and N=50,000 (lite) are measured (median ± std over
+30 runs across 7 dataset generators). Larger rows are power-law extrapolations
+(R² > 0.998).¹
+
+Full mode memory is O(N²) — exceeds 64 GB at N ≈ 35K.
+Lite mode memory is O(N) — feasible to millions of points on commodity hardware.
+
+<sub>¹ Benchmarked on 10-core ARM SoC (4P + 6E), 32 GB unified memory.</sub>
 
 ## Modes
 
@@ -174,7 +180,7 @@ Lite mode memory is O(N) — exceeds 64 GB at N ≈ 48M.
 | **Continuity** | On (toggleable via `continuity=False`) | Off |
 | **Merge gates** | Proximity + threshold + continuity | Proximity + threshold |
 | **Quality** | Paper-exact (ARI = 1.000 on benchmarks) | Lower — tends to under-merge |
-| **Memory** | O(N^2) | O(N) |
+| **Memory** | O(N²) | O(N) |
 | **Practical limit** | ~35K samples (64 GB) | Millions |
 | **Use when** | Quality matters | Scale or memory matters |
 
@@ -223,6 +229,9 @@ All parameters are keyword-only.
 These accept Protocol-compatible objects. See `src/gauging_delta/_types.py` for the protocol definitions.
 </details>
 
+<details>
+<summary>Methods and attributes</summary>
+
 ### Methods
 
 | Method | Returns | Description |
@@ -245,9 +254,11 @@ These accept Protocol-compatible objects. See `src/gauging_delta/_types.py` for 
 | `n_leaves_` | `int` | Number of leaves (= *n_samples*). |
 | `linkage_matrix_` | `np.ndarray` | Scipy-compatible *(n_samples-1, 4)* linkage matrix for dendrograms. |
 
+</details>
+
 ### Dendrogram
 
-> Requires matplotlib: `pip install gauging-delta[bench]`
+> Requires matplotlib: `uv add gauging-delta[bench]`
 
 ```python
 from scipy.cluster.hierarchy import dendrogram
